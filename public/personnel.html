@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Solar Savings Direct · Commissions</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script>
+    tailwind = { config: { theme: { extend: { colors: {
+      indigo: { 50:'#eef2f7',100:'#d6dfeb',200:'#a6bad5',300:'#6c8cb7',400:'#3c649a',500:'#1e4d8c',600:'#0b2545',700:'#061a2e',800:'#04121f',900:'#020a13' },
+      violet: { 50:'#fff8e6',100:'#ffecb3',200:'#ffdc7a',300:'#ffcc42',400:'#ffb703',500:'#ffb703',600:'#fd9e02',700:'#d48001',800:'#9e5f01',900:'#6e4201' }
+    } } } } };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body class="min-h-screen">
+
+<header class="bg-white border-b border-slate-200 sticky top-0 z-30">
+  <div class="max-w-7xl mx-auto px-4 lg:px-8">
+    <div class="flex items-center justify-between h-16">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-sun-gradient flex items-center justify-center text-white shadow-sm">
+          <i data-lucide="sun" class="w-5 h-5"></i>
+        </div>
+        <div>
+          <div class="font-bold text-slate-900 leading-tight">Solar Savings Direct</div>
+          <div class="text-xs text-slate-500 hidden sm:block">Commission Portal</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <div class="text-right hidden sm:block">
+          <div class="text-sm font-medium text-slate-800" id="userLabel"></div>
+          <div class="text-xs text-slate-500">Personnel</div>
+        </div>
+        <div class="w-9 h-9 rounded-full bg-sun-gradient flex items-center justify-center text-white font-semibold text-sm" id="userAvatar">?</div>
+        <button id="logoutBtn" class="text-slate-500 hover:text-slate-900 p-2" title="Sign out"><i data-lucide="log-out" class="w-4 h-4"></i></button>
+      </div>
+    </div>
+    <nav class="flex gap-1 -mb-px overflow-x-auto">
+      <button data-tab="dashboard" class="tab-btn"><i data-lucide="layout-dashboard"></i>Dashboard</button>
+      <button data-tab="entries" class="tab-btn"><i data-lucide="file-text"></i>My Entries</button>
+      <button data-tab="drive" class="tab-btn"><i data-lucide="folder-open"></i>Drive Links</button>
+      <button data-tab="settings" class="tab-btn"><i data-lucide="settings"></i>Settings</button>
+    </nav>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-4 lg:px-8 py-6 lg:py-8">
+  <!-- Dashboard -->
+  <div data-panel="dashboard" class="animate-fade-in">
+    <div class="mb-6 flex items-center justify-between flex-wrap gap-3">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900" id="greetingText">Welcome back</h1>
+        <p class="text-sm text-slate-500 mt-1">Current cycle: <span class="font-medium text-slate-700" id="currentCycleLabel"></span></p>
+      </div>
+      <button id="dashNewEntryBtn" class="inline-flex items-center gap-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg shadow-sm">
+        <i data-lucide="plus" class="w-4 h-4"></i> New Entry
+      </button>
+    </div>
+
+    <!-- KPI cards -->
+    <div class="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Lifetime Commission</div>
+            <div class="text-2xl font-bold text-slate-900 mt-2" id="statTotalCommission">$0.00</div>
+            <div class="text-xs text-slate-500 mt-2"><span id="statTotalEntries">0</span> total entries</div>
+          </div>
+          <div class="w-10 h-10 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center"><i data-lucide="wallet" class="w-5 h-5"></i></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">This Cycle</div>
+            <div class="text-2xl font-bold text-slate-900 mt-2" id="statCurrentCommission">$0.00</div>
+            <div class="text-xs text-slate-500 mt-2"><span id="statCurrentEntries">0</span> entries</div>
+          </div>
+          <div class="w-10 h-10 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center"><i data-lucide="calendar-days" class="w-5 h-5"></i></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Paid Out</div>
+            <div class="text-2xl font-bold text-emerald-600 mt-2" id="statPaid">$0.00</div>
+            <div class="text-xs text-slate-500 mt-2">received</div>
+          </div>
+          <div class="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center"><i data-lucide="check-circle-2" class="w-5 h-5"></i></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Pending / Unpaid</div>
+            <div class="text-2xl font-bold text-amber-600 mt-2" id="statPending">$0.00</div>
+            <div class="text-xs text-slate-500 mt-2">awaiting payout</div>
+          </div>
+          <div class="w-10 h-10 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center"><i data-lucide="clock" class="w-5 h-5"></i></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+      <div class="stat-card lg:col-span-2">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="font-semibold text-slate-900">Commission Over Time</h2>
+          <span class="text-xs text-slate-500">Last 8 cycles</span>
+        </div>
+        <div class="relative h-64"><canvas id="trendChart"></canvas></div>
+      </div>
+      <div class="stat-card">
+        <h2 class="font-semibold text-slate-900 mb-4">Status Breakdown</h2>
+        <div class="relative h-64 flex items-center justify-center"><canvas id="statusChart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-semibold text-slate-900">Current Cycle Entries</h2>
+        <span class="text-xs text-slate-500" id="currentCycleCount"></span>
+      </div>
+      <div id="currentCycleList"></div>
+    </div>
+  </div>
+
+  <!-- Entries -->
+  <div data-panel="entries" class="hidden animate-fade-in">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900">My Entries</h1>
+        <p class="text-sm text-slate-500 mt-1">You can edit or delete entries while they're still pending</p>
+      </div>
+      <button id="newEntryBtn" class="inline-flex items-center gap-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg shadow-sm">
+        <i data-lucide="plus" class="w-4 h-4"></i> New Entry
+      </button>
+    </div>
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+          <tr>
+            <th class="px-4 py-3 text-left">Date</th>
+            <th class="px-4 py-3 text-left">Description</th>
+            <th class="px-4 py-3 text-right">Sale</th>
+            <th class="px-4 py-3 text-center">Rate</th>
+            <th class="px-4 py-3 text-right">Commission</th>
+            <th class="px-4 py-3 text-left">Cycle</th>
+            <th class="px-4 py-3 text-left">Status</th>
+            <th class="px-4 py-3 text-left">Notes</th>
+            <th class="px-4 py-3 text-left"></th>
+          </tr>
+        </thead>
+        <tbody id="entriesBody" class="divide-y divide-slate-100"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Drive -->
+  <div data-panel="drive" class="hidden animate-fade-in">
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold text-slate-900">Drive Links</h1>
+      <p class="text-sm text-slate-500 mt-1">Resources and verification folders shared by admin</p>
+    </div>
+    <div id="driveLinks" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+  </div>
+
+  <!-- Settings -->
+  <div data-panel="settings" class="hidden animate-fade-in">
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold text-slate-900">Settings</h1>
+      <p class="text-sm text-slate-500 mt-1">Your account</p>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="stat-card">
+        <h2 class="font-semibold text-slate-900 mb-4">Change Password</h2>
+        <form id="changePasswordForm" class="space-y-3">
+          <div>
+            <label class="text-sm text-slate-700">Current Password</label>
+            <input name="current_password" type="password" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+          </div>
+          <div>
+            <label class="text-sm text-slate-700">New Password</label>
+            <input name="new_password" type="password" required minlength="4" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+          </div>
+          <button type="submit" class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium">Update Password</button>
+        </form>
+      </div>
+      <div class="stat-card">
+        <h2 class="font-semibold text-slate-900 mb-4">Profile</h2>
+        <dl class="text-sm space-y-2">
+          <div class="flex justify-between"><dt class="text-slate-500">Name</dt><dd class="font-medium text-slate-900" id="profileName"></dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Username</dt><dd class="font-medium text-slate-900 font-mono" id="profileUsername"></dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Default Rate</dt><dd class="font-medium text-slate-900" id="profileRate"></dd></div>
+        </dl>
+        <div class="mt-4 pt-4 border-t border-slate-100 text-xs text-slate-500">
+          The admin decides the final commission rate during verification. Your default rate is the starting assumption for new entries.
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Entry modal (new + edit) -->
+<div id="entryModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+  <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
+    <div class="flex items-start justify-between mb-4">
+      <h3 class="text-lg font-semibold text-slate-900" id="entryModalTitle">New Entry</h3>
+      <button type="button" data-close class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <form id="entryForm" class="space-y-3">
+      <input type="hidden" name="id" />
+      <div>
+        <label class="text-sm font-medium text-slate-700">Date</label>
+        <input name="sale_date" type="date" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Description</label>
+        <input name="description" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="What did you sell?" />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Sale Amount ($)</label>
+        <input name="sale_amount" id="saleAmountInput" type="number" step="0.01" min="0" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+        <div class="text-xs text-slate-500 mt-1" id="commissionPreview"></div>
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Drive Link (optional)</label>
+        <input name="drive_link" type="url" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="https://drive.google.com/..." />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Notes (optional)</label>
+        <textarea name="notes" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" rows="2"></textarea>
+      </div>
+
+      <!-- Attachments section -->
+      <div class="border-t border-slate-200 pt-3">
+        <div class="flex items-center justify-between mb-2">
+          <label class="text-sm font-medium text-slate-700 flex items-center gap-2">
+            <i data-lucide="paperclip" class="w-4 h-4"></i>
+            Proof / Attachments
+          </label>
+          <span class="text-xs text-slate-400" id="attachmentCount"></span>
+        </div>
+
+        <div id="existingAttachments" class="space-y-2 mb-2"></div>
+        <div id="queuedAttachments" class="space-y-2 mb-2"></div>
+
+        <label for="attachInput" class="block border-2 border-dashed border-slate-300 rounded-lg p-4 text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition">
+          <input id="attachInput" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,image/gif,application/pdf" multiple class="hidden" />
+          <i data-lucide="upload-cloud" class="w-6 h-6 mx-auto mb-1 text-slate-400"></i>
+          <div class="text-sm text-slate-600">Click to attach images or PDFs</div>
+          <div class="text-xs text-slate-400 mt-0.5">Max 10MB each &middot; up to 10 per entry &middot; JPG, PNG, WEBP, HEIC, GIF, PDF</div>
+        </label>
+      </div>
+
+      <div class="flex gap-2 pt-2">
+        <button type="button" data-close class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 font-medium">Cancel</button>
+        <button type="submit" class="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium" id="entrySubmitBtn">Submit</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="/js/common.js"></script>
+<script src="/js/personnel.js"></script>
+</body>
+</html>

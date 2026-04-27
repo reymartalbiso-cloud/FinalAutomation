@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin · Solar Savings Direct</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script>
+    tailwind = { config: { theme: { extend: { colors: {
+      indigo: { 50:'#eef2f7',100:'#d6dfeb',200:'#a6bad5',300:'#6c8cb7',400:'#3c649a',500:'#1e4d8c',600:'#0b2545',700:'#061a2e',800:'#04121f',900:'#020a13' },
+      violet: { 50:'#fff8e6',100:'#ffecb3',200:'#ffdc7a',300:'#ffcc42',400:'#ffb703',500:'#ffb703',600:'#fd9e02',700:'#d48001',800:'#9e5f01',900:'#6e4201' }
+    } } } } };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body class="min-h-screen">
+
+<!-- Sidebar -->
+<aside id="sidebar" class="admin-sidebar fixed inset-y-0 left-0 w-64 bg-slate-900 text-slate-300 flex flex-col z-40">
+  <div class="p-5 border-b border-white/10">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-sun-gradient flex items-center justify-center text-white shrink-0 shadow-md">
+        <i data-lucide="sun" class="w-5 h-5"></i>
+      </div>
+      <div class="min-w-0">
+        <div class="font-bold text-white truncate">Solar Savings Direct</div>
+        <div class="text-xs text-white/60 truncate">Commission Portal · Admin</div>
+      </div>
+    </div>
+  </div>
+
+  <nav class="flex-1 p-3 space-y-1 overflow-y-auto">
+    <button data-tab="dashboard" class="nav-item"><i data-lucide="layout-dashboard"></i><span>Dashboard</span></button>
+    <button data-tab="entries" class="nav-item"><i data-lucide="file-text"></i><span>All Entries</span>
+      <span id="pendingBadge" class="ml-auto text-xs bg-amber-500 text-white px-1.5 py-0.5 rounded-full hidden"></span>
+    </button>
+    <button data-tab="personnel" class="nav-item"><i data-lucide="users"></i><span>Personnel</span></button>
+    <button data-tab="drive" class="nav-item"><i data-lucide="folder-open"></i><span>Drive Links</span></button>
+    <button data-tab="reports" class="nav-item"><i data-lucide="bar-chart-3"></i><span>Reports</span></button>
+    <div class="pt-3 mt-3 border-t border-slate-800">
+      <button data-tab="settings" class="nav-item"><i data-lucide="settings"></i><span>Settings</span></button>
+    </div>
+  </nav>
+
+  <div class="p-3 border-t border-white/10">
+    <div class="flex items-center gap-3 p-2 rounded-lg">
+      <div class="w-9 h-9 rounded-full bg-sun-gradient flex items-center justify-center text-white font-semibold text-sm shrink-0" id="userAvatar">A</div>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-medium text-white truncate" id="userLabel">Administrator</div>
+        <div class="text-xs text-white/60">Admin</div>
+      </div>
+      <button id="logoutBtn" class="text-white/60 hover:text-white p-1" title="Sign out"><i data-lucide="log-out" class="w-4 h-4"></i></button>
+    </div>
+  </div>
+</aside>
+
+<!-- Mobile top bar -->
+<div class="lg:hidden fixed top-0 inset-x-0 h-14 bg-white border-b border-slate-200 z-30 flex items-center px-4 gap-3">
+  <button id="menuToggle" class="p-2 rounded-lg hover:bg-slate-100"><i data-lucide="menu" class="w-5 h-5"></i></button>
+  <div class="flex items-center gap-2">
+    <div class="w-7 h-7 rounded-lg bg-sun-gradient flex items-center justify-center text-white"><i data-lucide="sun" class="w-4 h-4"></i></div>
+    <div class="font-semibold text-slate-800">Solar Savings Direct</div>
+  </div>
+</div>
+
+<!-- Main -->
+<main class="admin-main lg:ml-64 min-h-screen pt-14 lg:pt-0">
+  <!-- ========= Dashboard ========= -->
+  <div data-panel="dashboard" class="p-6 lg:p-8 animate-fade-in">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900">Dashboard</h1>
+        <p class="text-sm text-slate-500 mt-1">Current cycle: <span id="dashCurrentCycle" class="font-medium text-slate-700"></span></p>
+      </div>
+      <div class="flex gap-2">
+        <button id="transferAllBtn" class="inline-flex items-center gap-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 px-4 py-2 rounded-lg shadow-sm">
+          <i data-lucide="arrow-right-circle" class="w-4 h-4"></i> Transfer Unpaid → Next Cycle
+        </button>
+      </div>
+    </div>
+
+    <!-- KPI cards -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Cycle Commission</div>
+            <div class="text-2xl font-bold text-slate-900 mt-2" id="kpiCommission">$0.00</div>
+            <div class="mt-2" id="kpiCommissionTrend"></div>
+          </div>
+          <div class="w-10 h-10 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center"><i data-lucide="wallet" class="w-5 h-5"></i></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Cycle Sales</div>
+            <div class="text-2xl font-bold text-slate-900 mt-2" id="kpiSales">$0.00</div>
+            <div class="mt-2" id="kpiSalesTrend"></div>
+          </div>
+          <div class="w-10 h-10 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center"><i data-lucide="shopping-cart" class="w-5 h-5"></i></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Pending Verification</div>
+            <div class="text-2xl font-bold text-amber-600 mt-2" id="kpiPending">0</div>
+            <div class="text-xs text-slate-500 mt-2">entries awaiting review</div>
+          </div>
+          <div class="w-10 h-10 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center"><i data-lucide="clock" class="w-5 h-5"></i></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Active Personnel</div>
+            <div class="text-2xl font-bold text-slate-900 mt-2" id="kpiPersonnel">0</div>
+            <div class="text-xs text-slate-500 mt-2">contributing this cycle</div>
+          </div>
+          <div class="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center"><i data-lucide="users" class="w-5 h-5"></i></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Charts row -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+      <div class="stat-card lg:col-span-2">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="font-semibold text-slate-900">Commission Trend</h2>
+          <span class="text-xs text-slate-500">Last 8 cycles</span>
+        </div>
+        <div class="relative h-64"><canvas id="trendChart"></canvas></div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="font-semibold text-slate-900">Current Cycle Status</h2>
+        </div>
+        <div class="relative h-64 flex items-center justify-center"><canvas id="statusChart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Leaderboard + recent -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="stat-card">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="font-semibold text-slate-900">Top Personnel (This Cycle)</h2>
+          <i data-lucide="trophy" class="w-5 h-5 text-amber-500"></i>
+        </div>
+        <div id="leaderboard" class="space-y-2"></div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="font-semibold text-slate-900">Pending Verifications</h2>
+          <button class="text-xs text-indigo-600 hover:underline" onclick="goToEntries()">View all →</button>
+        </div>
+        <div id="pendingList" class="space-y-2"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========= Entries ========= -->
+  <div data-panel="entries" class="p-6 lg:p-8 hidden animate-fade-in">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900">All Entries</h1>
+        <p class="text-sm text-slate-500 mt-1">Verify, adjust rates, and transfer across cycles</p>
+      </div>
+      <div class="flex gap-2">
+        <button id="exportCsvBtn" class="inline-flex items-center gap-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 px-4 py-2 rounded-lg">
+          <i data-lucide="download" class="w-4 h-4"></i> Export CSV
+        </button>
+        <button id="newAdminEntryBtn" class="inline-flex items-center gap-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg shadow-sm">
+          <i data-lucide="plus" class="w-4 h-4"></i> Add Entry
+        </button>
+      </div>
+    </div>
+
+    <div class="stat-card mb-4">
+      <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
+        <div class="md:col-span-2 relative">
+          <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+          <input id="searchInput" placeholder="Search description, personnel, notes..." class="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm" />
+        </div>
+        <select id="cycleFilter" class="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white"><option value="">All cycles</option></select>
+        <select id="statusFilter" class="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white">
+          <option value="">All statuses</option>
+          <option value="pending">Pending</option>
+          <option value="paid">Paid</option>
+          <option value="unpaid">Unpaid</option>
+        </select>
+        <select id="personnelFilter" class="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white"><option value="">All personnel</option></select>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+          <tr>
+            <th class="px-4 py-3 text-left">Date</th>
+            <th class="px-4 py-3 text-left">Personnel</th>
+            <th class="px-4 py-3 text-left">Description</th>
+            <th class="px-4 py-3 text-right">Sale</th>
+            <th class="px-4 py-3 text-center">Rate</th>
+            <th class="px-4 py-3 text-right">Commission</th>
+            <th class="px-4 py-3 text-left">Cycle</th>
+            <th class="px-4 py-3 text-left">Status</th>
+            <th class="px-4 py-3 text-left">Notes</th>
+            <th class="px-4 py-3 text-left"></th>
+          </tr>
+        </thead>
+        <tbody id="entriesBody" class="divide-y divide-slate-100"></tbody>
+      </table>
+    </div>
+    <div id="entriesPagination" class="flex flex-wrap items-center justify-between gap-3 mt-3 px-1"></div>
+  </div>
+
+  <!-- ========= Personnel ========= -->
+  <div data-panel="personnel" class="p-6 lg:p-8 hidden animate-fade-in">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900">Personnel</h1>
+        <p class="text-sm text-slate-500 mt-1">Manage team members, rates, and access</p>
+      </div>
+      <button id="newPersonnelBtn" class="inline-flex items-center gap-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg shadow-sm">
+        <i data-lucide="user-plus" class="w-4 h-4"></i> Add Personnel
+      </button>
+    </div>
+    <div id="personnelGrid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+  </div>
+
+  <!-- ========= Drive ========= -->
+  <div data-panel="drive" class="p-6 lg:p-8 hidden animate-fade-in">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900">Drive Links</h1>
+        <p class="text-sm text-slate-500 mt-1">Folders and files for verifying commissions</p>
+      </div>
+      <button id="newDriveLinkBtn" class="inline-flex items-center gap-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg shadow-sm">
+        <i data-lucide="link" class="w-4 h-4"></i> Add Link
+      </button>
+    </div>
+    <div id="driveLinks" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+  </div>
+
+  <!-- ========= Reports ========= -->
+  <div data-panel="reports" class="p-6 lg:p-8 hidden animate-fade-in">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900">Reports</h1>
+        <p class="text-sm text-slate-500 mt-1">Aggregated performance across periods</p>
+      </div>
+      <div class="flex gap-2">
+        <select id="reportPeriod" class="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white">
+          <option value="weekly">Weekly (by billing cycle)</option>
+          <option value="monthly">Monthly</option>
+          <option value="yearly">Yearly</option>
+        </select>
+        <button id="exportReportBtn" class="inline-flex items-center gap-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 px-4 py-2 rounded-lg">
+          <i data-lucide="download" class="w-4 h-4"></i> Export CSV
+        </button>
+      </div>
+    </div>
+
+    <div class="stat-card mb-4">
+      <div class="relative h-72"><canvas id="reportChart"></canvas></div>
+    </div>
+
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+          <tr>
+            <th class="px-4 py-3 text-left">Period</th>
+            <th class="px-4 py-3 text-right">Entries</th>
+            <th class="px-4 py-3 text-right">Total Sales</th>
+            <th class="px-4 py-3 text-right">Total Commission</th>
+            <th class="px-4 py-3 text-right">Paid</th>
+            <th class="px-4 py-3 text-right">Pending</th>
+            <th class="px-4 py-3 text-right">Unpaid</th>
+          </tr>
+        </thead>
+        <tbody id="reportsBody" class="divide-y divide-slate-100"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ========= Settings ========= -->
+  <div data-panel="settings" class="p-6 lg:p-8 hidden animate-fade-in">
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold text-slate-900">Settings</h1>
+      <p class="text-sm text-slate-500 mt-1">Account and preferences</p>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="stat-card">
+        <h2 class="font-semibold text-slate-900 mb-4">Change Password</h2>
+        <form id="changePasswordForm" class="space-y-3">
+          <div>
+            <label class="text-sm text-slate-700">Current Password</label>
+            <input name="current_password" type="password" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+          </div>
+          <div>
+            <label class="text-sm text-slate-700">New Password</label>
+            <input name="new_password" type="password" required minlength="4" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+          </div>
+          <button type="submit" class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium">Update Password</button>
+        </form>
+      </div>
+      <div class="stat-card">
+        <h2 class="font-semibold text-slate-900 mb-4">About</h2>
+        <dl class="text-sm space-y-2">
+          <div class="flex justify-between"><dt class="text-slate-500">Version</dt><dd class="font-medium text-slate-900">1.0.0</dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Billing day</dt><dd class="font-medium text-slate-900">Every Friday</dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Total entries</dt><dd class="font-medium text-slate-900" id="settingsTotalEntries">0</dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Total commission</dt><dd class="font-medium text-slate-900" id="settingsTotalCommission">$0.00</dd></div>
+        </dl>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ========== Modals ========== -->
+
+<!-- Edit/Verify entry -->
+<div id="editEntryModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+  <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl">
+    <div class="flex items-start justify-between mb-4">
+      <h3 class="text-lg font-semibold text-slate-900">Verify Entry</h3>
+      <button type="button" data-close class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <div id="editEntryInfo" class="text-sm bg-slate-50 rounded-xl p-4 mb-4 space-y-1"></div>
+    <div id="editEntryAttachments" class="mb-4"></div>
+    <form id="editEntryForm" class="space-y-4">
+      <input type="hidden" name="id" />
+      <div>
+        <label class="text-sm font-medium text-slate-700">Commission Rate</label>
+        <div class="flex gap-2 mt-1.5">
+          <label class="flex-1 border border-slate-300 rounded-lg p-3 cursor-pointer hover:bg-slate-50 has-[:checked]:border-indigo-500 has-[:checked]:bg-indigo-50 has-[:checked]:text-indigo-700 text-center font-medium">
+            <input type="radio" name="commission_rate" value="70" class="mr-2" /> 70%
+          </label>
+          <label class="flex-1 border border-slate-300 rounded-lg p-3 cursor-pointer hover:bg-slate-50 has-[:checked]:border-indigo-500 has-[:checked]:bg-indigo-50 has-[:checked]:text-indigo-700 text-center font-medium">
+            <input type="radio" name="commission_rate" value="30" class="mr-2" /> 30%
+          </label>
+        </div>
+        <div class="text-xs text-slate-500 mt-1.5" id="editRatePreview"></div>
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Status</label>
+        <select name="status" class="w-full mt-1.5 px-3 py-2 border border-slate-300 rounded-lg bg-white">
+          <option value="pending">Pending — awaiting decision</option>
+          <option value="paid">Paid — commission has been disbursed</option>
+          <option value="unpaid">Unpaid — stays in current cycle</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Admin Notes</label>
+        <textarea name="notes" class="w-full mt-1.5 px-3 py-2 border border-slate-300 rounded-lg" rows="2" placeholder="Optional notes visible to personnel"></textarea>
+      </div>
+      <div class="flex gap-2 pt-2">
+        <button type="button" data-close class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 font-medium">Cancel</button>
+        <button type="submit" class="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Admin create entry -->
+<div id="newAdminEntryModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+  <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
+    <div class="flex items-start justify-between mb-4">
+      <h3 class="text-lg font-semibold text-slate-900">Add Entry</h3>
+      <button type="button" data-close class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <form id="newAdminEntryForm" class="space-y-3">
+      <div>
+        <label class="text-sm font-medium text-slate-700">Personnel</label>
+        <select name="personnel_id" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg bg-white"></select>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="text-sm font-medium text-slate-700">Date</label>
+          <input name="sale_date" type="date" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+        </div>
+        <div>
+          <label class="text-sm font-medium text-slate-700">Sale Amount ($)</label>
+          <input name="sale_amount" type="number" step="0.01" min="0" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+        </div>
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Description</label>
+        <input name="description" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="What was sold" />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Commission Rate</label>
+        <div class="flex gap-2 mt-1">
+          <label class="flex-1 border border-slate-300 rounded-lg p-2.5 cursor-pointer hover:bg-slate-50 has-[:checked]:border-indigo-500 has-[:checked]:bg-indigo-50 text-center text-sm font-medium">
+            <input type="radio" name="commission_rate" value="70" class="mr-1" checked /> 70%
+          </label>
+          <label class="flex-1 border border-slate-300 rounded-lg p-2.5 cursor-pointer hover:bg-slate-50 has-[:checked]:border-indigo-500 has-[:checked]:bg-indigo-50 text-center text-sm font-medium">
+            <input type="radio" name="commission_rate" value="30" class="mr-1" /> 30%
+          </label>
+        </div>
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Drive Link (optional)</label>
+        <input name="drive_link" type="url" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="https://drive.google.com/..." />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Notes (optional)</label>
+        <textarea name="notes" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" rows="2"></textarea>
+      </div>
+      <div class="flex gap-2 pt-2">
+        <button type="button" data-close class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 font-medium">Cancel</button>
+        <button type="submit" class="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium">Create</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- New personnel -->
+<div id="newPersonnelModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+  <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
+    <div class="flex items-start justify-between mb-4">
+      <h3 class="text-lg font-semibold text-slate-900">Add Personnel</h3>
+      <button type="button" data-close class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <form id="newPersonnelForm" class="space-y-3">
+      <div>
+        <label class="text-sm font-medium text-slate-700">Full Name</label>
+        <input name="full_name" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Username</label>
+        <input name="username" required autocomplete="off" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Password (min 4 chars)</label>
+        <input name="password" type="text" required minlength="4" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Default Commission Rate</label>
+        <div class="flex gap-2 mt-1">
+          <label class="flex-1 border border-slate-300 rounded-lg p-2.5 cursor-pointer hover:bg-slate-50 has-[:checked]:border-indigo-500 has-[:checked]:bg-indigo-50 text-center text-sm font-medium">
+            <input type="radio" name="default_commission_rate" value="70" class="mr-1" checked /> 70%
+          </label>
+          <label class="flex-1 border border-slate-300 rounded-lg p-2.5 cursor-pointer hover:bg-slate-50 has-[:checked]:border-indigo-500 has-[:checked]:bg-indigo-50 text-center text-sm font-medium">
+            <input type="radio" name="default_commission_rate" value="30" class="mr-1" /> 30%
+          </label>
+        </div>
+      </div>
+      <div class="flex gap-2 pt-2">
+        <button type="button" data-close class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 font-medium">Cancel</button>
+        <button type="submit" class="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium">Create</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Transfer modal (single + bulk) -->
+<div id="transferModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+  <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
+    <div class="flex items-start justify-between mb-4">
+      <h3 class="text-lg font-semibold text-slate-900" id="transferTitle">Move to Next Cycle</h3>
+      <button type="button" data-close class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <div id="transferInfo" class="text-sm bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4"></div>
+    <form id="transferForm" class="space-y-3">
+      <input type="hidden" name="id" />
+      <input type="hidden" name="cycle" />
+      <input type="hidden" name="mode" />
+      <div>
+        <label class="text-sm font-medium text-slate-700">Reason for moving <span class="text-rose-600">*</span></label>
+        <textarea name="note" required rows="3" class="w-full mt-1.5 px-3 py-2 border border-slate-300 rounded-lg" placeholder="e.g. Client requested delay, pending verification, incomplete documentation..."></textarea>
+        <div class="text-xs text-slate-500 mt-1.5 flex items-start gap-1">
+          <i data-lucide="info" class="w-3 h-3 mt-0.5 shrink-0"></i>
+          <span>This reason will be prepended to the entry's notes for traceability.</span>
+        </div>
+      </div>
+      <div class="flex gap-2 pt-2">
+        <button type="button" data-close class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 font-medium">Cancel</button>
+        <button type="submit" class="flex-1 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium inline-flex items-center justify-center gap-2">
+          <i data-lucide="arrow-right-circle" class="w-4 h-4"></i> Move
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Drive link modal -->
+<div id="driveLinkModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+  <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
+    <div class="flex items-start justify-between mb-4">
+      <h3 class="text-lg font-semibold text-slate-900" id="driveLinkTitle">Add Drive Link</h3>
+      <button type="button" data-close class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <form id="driveLinkForm" class="space-y-3">
+      <input type="hidden" name="id" />
+      <div>
+        <label class="text-sm font-medium text-slate-700">Title</label>
+        <input name="title" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">URL</label>
+        <input name="url" type="url" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="https://drive.google.com/..." />
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700">Description (optional)</label>
+        <textarea name="description" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" rows="2"></textarea>
+      </div>
+      <div class="flex gap-2 pt-2">
+        <button type="button" data-close class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 font-medium">Cancel</button>
+        <button type="submit" class="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="/js/common.js"></script>
+<script src="/js/admin.js"></script>
+</body>
+</html>

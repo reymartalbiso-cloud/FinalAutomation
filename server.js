@@ -1,0 +1,715 @@
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+const multer = require('multer');
+const db = require('./db');
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+
+// Enforce strong JWT secret in production
+if (NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET environment variable is required in production.');
+  process.exit(1);
+}
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
+
+// Upload directory
+const UPLOAD_DIR = path.join(__dirname, 'data', 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// ============ MIDDLEWARE ============
+app.use(helmet({
+  // Allow CDN scripts/styles for Tailwind/Lucide/Chart.js. For tighter prod-grade CSP,
+  // self-host these assets and re-enable CSP with explicit allowlist.
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
+app.use(compression());
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: false, limit: '1mb' }));
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: NODE_ENV === 'production' ? '1d' : 0 }));
+
+// Light request logger
+app.use((req, res, next) => {
+  const t = Date.now();
+  res.on('finish', () => {
+    if (req.url.startsWith('/api/') && (res.statusCode >= 400 || NODE_ENV !== 'production')) {
+      console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} -> ${res.statusCode} (${Date.now() - t}ms)`);
+    }
+  });
+  next();
+});
+
+// ============ HELPERS ============
+function toYMD(d) { return d.toISOString().slice(0, 10); }
+function getCycleFridayInclusive(date = new Date()) {
+  const d = new Date(date);
+  const day = d.getDay();
+  d.setDate(d.getDate() + ((5 - day + 7) % 7));
+  return toYMD(d);
+}
+function nextCycleAfter(s) { const d = new Date(s + 'T00:00:00'); d.setDate(d.getDate() + 7); return toYMD(d); }
+function prevCycleBefore(s) { const d = new Date(s + 'T00:00:00'); d.setDate(d.getDate() - 7); return toYMD(d); }
+function lastNCycles(n) {
+  const out = [];
+  let cur = getCycleFridayInclusive();
+  for (let i = 0; i < n; i++) { out.unshift(cur); cur = prevCycleBefore(cur); }
+  return out;
+}
+
+function asyncHandler(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+function authRequired(req, res, next) {
+  const auth = req.headers.authorization || '';
+  let token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (!token && req.query.token) token = String(req.query.token);
+  if (!token) return res.status(401).json({ error: 'No token' });
+  try { req.user = jwt.verify(token, JWT_SECRET); next(); }
+  catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
+}
+
+function adminRequired(req, res, next) {
+  if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+
+// ============ FILE UPLOAD CONFIG ============
+const ALLOWED_MIME = new Set([
+  'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif',
+  'application/pdf'
+]);
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_FILES_PER_REQUEST = 5;
+const MAX_FILES_PER_ENTRY = 10;
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '').slice(0, 8);
+    cb(null, crypto.randomUUID() + ext);
+  }
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: MAX_FILE_SIZE, files: MAX_FILES_PER_REQUEST },
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_MIME.has(file.mimetype)) cb(null, true);
+    else cb(new Error('Unsupported file type: ' + file.mimetype));
+  }
+});
+
+function safeUnlink(p) { fs.unlink(p, () => {}); }
+function deleteAttachmentFiles(entryId) {
+  const atts = db.prepare('SELECT filename FROM attachments WHERE entry_id = ?').all(entryId);
+  atts.forEach(a => safeUnlink(path.join(UPLOAD_DIR, a.filename)));
+}
+
+// ============ AUTH ============
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: 'Too many login attempts. Please try again in a few minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+app.post('/api/auth/login', loginLimiter, (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.status(400).json({ error: 'Missing credentials' });
+  const user = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(String(username).trim());
+  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+    return res.status(401).json({ error: 'Invalid username or password' });
+  }
+  const token = jwt.sign(
+    { id: user.id, username: user.username, role: user.role, full_name: user.full_name },
+    JWT_SECRET, { expiresIn: '7d' }
+  );
+  res.json({ token, user: { id: user.id, username: user.username, role: user.role, full_name: user.full_name } });
+});
+
+app.get('/api/auth/me', authRequired, (req, res) => {
+  const row = db.prepare('SELECT id, username, role, full_name, default_commission_rate FROM users WHERE id = ?').get(req.user.id);
+  if (!row) return res.status(404).json({ error: 'User not found' });
+  res.json({ user: row });
+});
+
+app.post('/api/auth/change-password', authRequired, (req, res) => {
+  const { current_password, new_password } = req.body || {};
+  if (!current_password || !new_password) return res.status(400).json({ error: 'Missing fields' });
+  if (String(new_password).length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters' });
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!user || !bcrypt.compareSync(current_password, user.password_hash)) {
+    return res.status(401).json({ error: 'Current password is incorrect' });
+  }
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(new_password, 10), req.user.id);
+  res.json({ ok: true });
+});
+
+// ============ PERSONNEL ============
+app.get('/api/personnel/me/entries', authRequired, (req, res) => {
+  const rows = db.prepare(`
+    SELECT *, (SELECT COUNT(*) FROM attachments WHERE entry_id = entries.id) as attachment_count
+    FROM entries WHERE personnel_id = ?
+    ORDER BY sale_date DESC, id DESC
+  `).all(req.user.id);
+  res.json(rows);
+});
+
+app.get('/api/personnel/me/stats', authRequired, (req, res) => {
+  const uid = req.user.id;
+  const currentCycle = getCycleFridayInclusive();
+
+  const totals = db.prepare(`
+    SELECT
+      COALESCE(SUM(sale_amount), 0) as totalSales,
+      COALESCE(SUM(commission_amount), 0) as totalCommission,
+      COALESCE(SUM(CASE WHEN status='paid' THEN commission_amount ELSE 0 END), 0) as totalPaid,
+      COALESCE(SUM(CASE WHEN status!='paid' THEN commission_amount ELSE 0 END), 0) as totalPending,
+      COUNT(*) as totalEntries
+    FROM entries WHERE personnel_id = ?
+  `).get(uid);
+
+  const currentCycleStats = db.prepare(`
+    SELECT
+      COALESCE(SUM(sale_amount), 0) as sales,
+      COALESCE(SUM(commission_amount), 0) as commission,
+      COUNT(*) as entryCount
+    FROM entries WHERE personnel_id = ? AND billing_cycle_date = ?
+  `).get(uid, currentCycle);
+
+  const cycles = lastNCycles(8);
+  const ph = cycles.map(() => '?').join(',');
+  const trendRows = db.prepare(`
+    SELECT billing_cycle_date as cycle,
+      COALESCE(SUM(commission_amount), 0) as commission,
+      COALESCE(SUM(sale_amount), 0) as sales,
+      COUNT(*) as entry_count
+    FROM entries WHERE personnel_id = ? AND billing_cycle_date IN (${ph})
+    GROUP BY billing_cycle_date
+  `).all(uid, ...cycles);
+  const map = Object.fromEntries(trendRows.map(r => [r.cycle, r]));
+  const weeklyTrend = cycles.map(c => ({
+    cycle: c, commission: map[c]?.commission || 0, sales: map[c]?.sales || 0, entry_count: map[c]?.entry_count || 0
+  }));
+
+  const statusBreakdown = db.prepare(`
+    SELECT status, COUNT(*) as count, COALESCE(SUM(commission_amount),0) as amount
+    FROM entries WHERE personnel_id = ? GROUP BY status
+  `).all(uid);
+
+  res.json({ currentCycle, totals, currentCycleStats, weeklyTrend, statusBreakdown });
+});
+
+app.post('/api/personnel/entries', authRequired, (req, res) => {
+  if (req.user.role !== 'personnel') return res.status(403).json({ error: 'Personnel only' });
+  const { sale_date, description, sale_amount, notes, drive_link } = req.body || {};
+  if (!sale_date || !description || sale_amount == null) return res.status(400).json({ error: 'Missing required fields' });
+  const sale = parseFloat(sale_amount);
+  if (isNaN(sale) || sale < 0 || sale > 1e9) return res.status(400).json({ error: 'Invalid sale amount' });
+  if (String(description).length > 500) return res.status(400).json({ error: 'Description too long (max 500 chars)' });
+  const u = db.prepare('SELECT default_commission_rate FROM users WHERE id = ?').get(req.user.id);
+  const rate = u?.default_commission_rate || 70;
+  const commission = (sale * rate) / 100;
+  const cycle = getCycleFridayInclusive();
+  const result = db.prepare(`
+    INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, billing_cycle_date, notes, drive_link)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(req.user.id, sale_date, description.trim(), sale, rate, commission, cycle, notes?.trim() || null, drive_link?.trim() || null);
+  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.patch('/api/personnel/entries/:id', authRequired, (req, res) => {
+  if (req.user.role !== 'personnel') return res.status(403).json({ error: 'Personnel only' });
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+  const entry = db.prepare('SELECT * FROM entries WHERE id = ? AND personnel_id = ?').get(id, req.user.id);
+  if (!entry) return res.status(404).json({ error: 'Not found' });
+  if (entry.status !== 'pending') return res.status(400).json({ error: 'Only pending entries can be edited' });
+  const { sale_date, description, sale_amount, notes, drive_link } = req.body || {};
+  const newSale = sale_amount != null ? parseFloat(sale_amount) : entry.sale_amount;
+  if (isNaN(newSale) || newSale < 0 || newSale > 1e9) return res.status(400).json({ error: 'Invalid sale amount' });
+  const newCommission = (newSale * entry.commission_rate) / 100;
+  db.prepare(`
+    UPDATE entries SET sale_date = COALESCE(?, sale_date), description = COALESCE(?, description),
+      sale_amount = ?, commission_amount = ?, notes = ?, drive_link = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `).run(sale_date || null, description?.trim() || null, newSale, newCommission, notes?.trim() || null, drive_link?.trim() || null, id);
+  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
+});
+
+app.delete('/api/personnel/entries/:id', authRequired, (req, res) => {
+  if (req.user.role !== 'personnel') return res.status(403).json({ error: 'Personnel only' });
+  const id = parseInt(req.params.id);
+  const entry = db.prepare('SELECT * FROM entries WHERE id = ? AND personnel_id = ?').get(id, req.user.id);
+  if (!entry) return res.status(404).json({ error: 'Not found' });
+  if (entry.status !== 'pending') return res.status(400).json({ error: 'Only pending entries can be deleted' });
+  deleteAttachmentFiles(id);
+  db.prepare('DELETE FROM entries WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+// ============ ATTACHMENTS ============
+app.get('/api/entries/:id/attachments', authRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  const entry = db.prepare('SELECT personnel_id FROM entries WHERE id = ?').get(id);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  if (req.user.role !== 'admin' && req.user.id !== entry.personnel_id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const rows = db.prepare(`
+    SELECT id, original_name, mime_type, size, created_at
+    FROM attachments WHERE entry_id = ? ORDER BY created_at ASC, id ASC
+  `).all(id);
+  res.json(rows);
+});
+
+app.post('/api/entries/:id/attachments',
+  authRequired,
+  (req, res, next) => {
+    upload.array('files', MAX_FILES_PER_REQUEST)(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: `File too large (max ${MAX_FILE_SIZE / 1024 / 1024}MB)` });
+        if (err.code === 'LIMIT_FILE_COUNT') return res.status(400).json({ error: `Too many files (max ${MAX_FILES_PER_REQUEST} per upload)` });
+        return res.status(400).json({ error: err.message });
+      }
+      if (err) return res.status(400).json({ error: err.message });
+      next();
+    });
+  },
+  (req, res) => {
+    const id = parseInt(req.params.id);
+    const entry = db.prepare('SELECT personnel_id, status FROM entries WHERE id = ?').get(id);
+    const cleanup = () => req.files?.forEach(f => safeUnlink(f.path));
+    if (!entry) { cleanup(); return res.status(404).json({ error: 'Entry not found' }); }
+    if (req.user.role !== 'admin' && req.user.id !== entry.personnel_id) {
+      cleanup(); return res.status(403).json({ error: 'Forbidden' });
+    }
+    if (req.user.role === 'personnel' && entry.status !== 'pending') {
+      cleanup(); return res.status(400).json({ error: 'Cannot attach to verified entries' });
+    }
+    if (!req.files?.length) return res.status(400).json({ error: 'No files uploaded' });
+
+    const existing = db.prepare('SELECT COUNT(*) as c FROM attachments WHERE entry_id = ?').get(id).c;
+    if (existing + req.files.length > MAX_FILES_PER_ENTRY) {
+      cleanup();
+      return res.status(400).json({ error: `Max ${MAX_FILES_PER_ENTRY} attachments per entry (currently ${existing})` });
+    }
+
+    const ins = db.prepare(`
+      INSERT INTO attachments (entry_id, filename, original_name, mime_type, size, uploaded_by)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const tx = db.transaction((files) => {
+      const out = [];
+      for (const f of files) {
+        const r = ins.run(id, f.filename, f.originalname.slice(0, 255), f.mimetype, f.size, req.user.id);
+        out.push({ id: r.lastInsertRowid, original_name: f.originalname, mime_type: f.mimetype, size: f.size });
+      }
+      return out;
+    });
+    res.json({ uploaded: tx(req.files) });
+  }
+);
+
+app.get('/api/attachments/:id', authRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  const att = db.prepare(`
+    SELECT a.*, e.personnel_id FROM attachments a
+    JOIN entries e ON e.id = a.entry_id
+    WHERE a.id = ?
+  `).get(id);
+  if (!att) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'admin' && req.user.id !== att.personnel_id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const filePath = path.join(UPLOAD_DIR, att.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing on disk' });
+  res.setHeader('Content-Type', att.mime_type);
+  res.setHeader('Content-Disposition', `inline; filename="${att.original_name.replace(/[^\w.\- ]/g, '_')}"`);
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  fs.createReadStream(filePath).pipe(res);
+});
+
+app.delete('/api/attachments/:id', authRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  const att = db.prepare(`
+    SELECT a.*, e.personnel_id, e.status FROM attachments a
+    JOIN entries e ON e.id = a.entry_id WHERE a.id = ?
+  `).get(id);
+  if (!att) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'admin' && req.user.id !== att.personnel_id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  if (req.user.role === 'personnel' && att.status !== 'pending') {
+    return res.status(400).json({ error: 'Cannot remove attachments from verified entries' });
+  }
+  safeUnlink(path.join(UPLOAD_DIR, att.filename));
+  db.prepare('DELETE FROM attachments WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+// ============ ADMIN: ENTRIES (paginated) ============
+app.get('/api/admin/entries', authRequired, adminRequired, (req, res) => {
+  const { search, cycle, status, personnel_id, from, to } = req.query;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
+  const offset = (page - 1) * pageSize;
+
+  let where = ' WHERE 1=1';
+  const params = [];
+  if (search) { where += ' AND (e.description LIKE ? OR u.full_name LIKE ? OR e.notes LIKE ?)'; const s = `%${search}%`; params.push(s, s, s); }
+  if (cycle) { where += ' AND e.billing_cycle_date = ?'; params.push(cycle); }
+  if (status) { where += ' AND e.status = ?'; params.push(status); }
+  if (personnel_id) { where += ' AND e.personnel_id = ?'; params.push(parseInt(personnel_id)); }
+  if (from) { where += ' AND e.sale_date >= ?'; params.push(from); }
+  if (to) { where += ' AND e.sale_date <= ?'; params.push(to); }
+
+  const totalRow = db.prepare(`SELECT COUNT(*) as c FROM entries e JOIN users u ON u.id = e.personnel_id ${where}`).get(...params);
+  const total = totalRow.c;
+  const data = db.prepare(`
+    SELECT e.*, u.full_name as personnel_name, u.username as personnel_username,
+      (SELECT COUNT(*) FROM attachments WHERE entry_id = e.id) as attachment_count
+    FROM entries e
+    JOIN users u ON u.id = e.personnel_id
+    ${where}
+    ORDER BY e.billing_cycle_date DESC, e.sale_date DESC, e.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, pageSize, offset);
+
+  res.json({ data, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) });
+});
+
+app.post('/api/admin/entries', authRequired, adminRequired, (req, res) => {
+  const { personnel_id, sale_date, description, sale_amount, commission_rate, status, notes, drive_link, billing_cycle_date } = req.body || {};
+  if (!personnel_id || !sale_date || !description || sale_amount == null) return res.status(400).json({ error: 'Missing required fields' });
+  const sale = parseFloat(sale_amount);
+  if (isNaN(sale) || sale < 0 || sale > 1e9) return res.status(400).json({ error: 'Invalid sale amount' });
+  const p = db.prepare("SELECT id, default_commission_rate FROM users WHERE id = ? AND role='personnel'").get(parseInt(personnel_id));
+  if (!p) return res.status(400).json({ error: 'Personnel not found' });
+  const rate = commission_rate != null ? parseInt(commission_rate) : (p.default_commission_rate || 70);
+  if (![30, 70].includes(rate)) return res.status(400).json({ error: 'Rate must be 30 or 70' });
+  const result = db.prepare(`
+    INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, status, billing_cycle_date, notes, drive_link)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(p.id, sale_date, description.trim(), sale, rate, (sale * rate) / 100, status || 'pending', billing_cycle_date || getCycleFridayInclusive(), notes?.trim() || null, drive_link?.trim() || null);
+  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(result.lastInsertRowid));
+});
+
+app.patch('/api/admin/entries/:id', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
+  if (!entry) return res.status(404).json({ error: 'Not found' });
+  const { status, commission_rate, notes, billing_cycle_date, sale_amount, sale_date, description, drive_link } = req.body || {};
+  if (status && !['pending', 'paid', 'unpaid'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
+  const newRate = commission_rate != null ? parseInt(commission_rate) : entry.commission_rate;
+  if (![30, 70].includes(newRate)) return res.status(400).json({ error: 'Rate must be 30 or 70' });
+  const newSale = sale_amount != null ? parseFloat(sale_amount) : entry.sale_amount;
+  if (isNaN(newSale) || newSale < 0 || newSale > 1e9) return res.status(400).json({ error: 'Invalid sale amount' });
+  const newCommission = (newSale * newRate) / 100;
+  db.prepare(`
+    UPDATE entries SET status = COALESCE(?, status), commission_rate = ?, sale_amount = ?, commission_amount = ?,
+      sale_date = COALESCE(?, sale_date), description = COALESCE(?, description),
+      drive_link = COALESCE(?, drive_link), notes = COALESCE(?, notes),
+      billing_cycle_date = COALESCE(?, billing_cycle_date), updated_at = datetime('now')
+    WHERE id = ?
+  `).run(status || null, newRate, newSale, newCommission, sale_date || null, description?.trim() || null,
+         drive_link != null ? drive_link.trim() : null, notes != null ? notes.trim() : null,
+         billing_cycle_date || null, id);
+  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
+});
+
+app.delete('/api/admin/entries/:id', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+  deleteAttachmentFiles(id);
+  db.prepare('DELETE FROM entries WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+function prependTransferNote(existing, from, to, reason) {
+  const stamp = `[Moved ${from} → ${to}] ${reason}`;
+  return existing && existing.trim() ? `${stamp}\n\n${existing}` : stamp;
+}
+
+app.post('/api/admin/entries/:id/transfer', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  const { note } = req.body || {};
+  if (!note?.trim()) return res.status(400).json({ error: 'A reason is required to move an entry' });
+  const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
+  if (!entry) return res.status(404).json({ error: 'Not found' });
+  const next = nextCycleAfter(entry.billing_cycle_date);
+  const newNotes = prependTransferNote(entry.notes, entry.billing_cycle_date, next, note.trim());
+  db.prepare("UPDATE entries SET billing_cycle_date = ?, status = 'pending', notes = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(next, newNotes, id);
+  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
+});
+
+app.post('/api/admin/transfer-unpaid', authRequired, adminRequired, (req, res) => {
+  const { cycle, note } = req.body || {};
+  if (!cycle) return res.status(400).json({ error: 'Missing cycle' });
+  if (!note?.trim()) return res.status(400).json({ error: 'A reason is required' });
+  const next = nextCycleAfter(cycle);
+  const rows = db.prepare("SELECT id, notes FROM entries WHERE billing_cycle_date = ? AND status != 'paid'").all(cycle);
+  const update = db.prepare("UPDATE entries SET billing_cycle_date = ?, status = 'pending', notes = ?, updated_at = datetime('now') WHERE id = ?");
+  db.transaction((list) => {
+    for (const e of list) update.run(next, prependTransferNote(e.notes, cycle, next, note.trim()), e.id);
+  })(rows);
+  res.json({ moved: rows.length, nextCycle: next });
+});
+
+// ============ ADMIN: PERSONNEL ============
+app.get('/api/admin/personnel', authRequired, adminRequired, (req, res) => {
+  const rows = db.prepare(`
+    SELECT u.id, u.username, u.full_name, u.default_commission_rate, u.active, u.created_at,
+      COALESCE(SUM(e.sale_amount), 0) as total_sales,
+      COALESCE(SUM(e.commission_amount), 0) as total_commission,
+      COALESCE(SUM(CASE WHEN e.status='paid' THEN e.commission_amount ELSE 0 END), 0) as total_paid,
+      COALESCE(SUM(CASE WHEN e.status!='paid' THEN e.commission_amount ELSE 0 END), 0) as total_pending,
+      COUNT(e.id) as entry_count
+    FROM users u LEFT JOIN entries e ON e.personnel_id = u.id
+    WHERE u.role = 'personnel'
+    GROUP BY u.id ORDER BY u.full_name
+  `).all();
+  res.json(rows);
+});
+
+app.post('/api/admin/personnel', authRequired, adminRequired, (req, res) => {
+  const { username, password, full_name, default_commission_rate } = req.body || {};
+  if (!username || !password || !full_name) return res.status(400).json({ error: 'Missing fields' });
+  if (String(username).length > 50 || String(full_name).length > 100) return res.status(400).json({ error: 'Field too long' });
+  if (String(password).length < 4) return res.status(400).json({ error: 'Password too short (min 4 chars)' });
+  const rate = parseInt(default_commission_rate) || 70;
+  if (![30, 70].includes(rate)) return res.status(400).json({ error: 'Rate must be 30 or 70' });
+  const hash = bcrypt.hashSync(password, 10);
+  try {
+    const r = db.prepare(`
+      INSERT INTO users (username, password_hash, role, full_name, default_commission_rate)
+      VALUES (?, ?, 'personnel', ?, ?)
+    `).run(String(username).trim(), hash, String(full_name).trim(), rate);
+    res.json({ id: r.lastInsertRowid, username, full_name, default_commission_rate: rate, active: 1 });
+  } catch (e) {
+    res.status(400).json({ error: e.message.includes('UNIQUE') ? 'Username already exists' : e.message });
+  }
+});
+
+app.patch('/api/admin/personnel/:id', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  const { full_name, default_commission_rate, active, password } = req.body || {};
+  const updates = [], params = [];
+  if (full_name != null) { updates.push('full_name = ?'); params.push(String(full_name).trim()); }
+  if (default_commission_rate != null) {
+    const rate = parseInt(default_commission_rate);
+    if (![30, 70].includes(rate)) return res.status(400).json({ error: 'Rate must be 30 or 70' });
+    updates.push('default_commission_rate = ?'); params.push(rate);
+  }
+  if (active != null) { updates.push('active = ?'); params.push(active ? 1 : 0); }
+  if (password) {
+    if (String(password).length < 4) return res.status(400).json({ error: 'Password too short' });
+    updates.push('password_hash = ?'); params.push(bcrypt.hashSync(password, 10));
+  }
+  if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
+  params.push(id);
+  const result = db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ? AND role = 'personnel'`).run(...params);
+  if (!result.changes) return res.status(404).json({ error: 'Personnel not found' });
+  res.json(db.prepare('SELECT id, username, full_name, default_commission_rate, active FROM users WHERE id = ?').get(id));
+});
+
+// ============ ADMIN: STATS / REPORTS ============
+app.get('/api/admin/stats', authRequired, adminRequired, (req, res) => {
+  const currentCycle = getCycleFridayInclusive();
+  const prevCycle = prevCycleBefore(currentCycle);
+  const cycleStats = (cy) => db.prepare(`
+    SELECT
+      COALESCE(SUM(sale_amount), 0) as sales,
+      COALESCE(SUM(commission_amount), 0) as commission,
+      COALESCE(SUM(CASE WHEN status='paid' THEN commission_amount ELSE 0 END), 0) as paidCommission,
+      COALESCE(SUM(CASE WHEN status='pending' THEN commission_amount ELSE 0 END), 0) as pendingCommission,
+      COALESCE(SUM(CASE WHEN status='unpaid' THEN commission_amount ELSE 0 END), 0) as unpaidCommission,
+      COUNT(*) as entryCount
+    FROM entries WHERE billing_cycle_date = ?
+  `).get(cy);
+  const current = cycleStats(currentCycle);
+  const prev = cycleStats(prevCycle);
+  const totals = db.prepare(`
+    SELECT
+      COALESCE(SUM(sale_amount), 0) as totalSales,
+      COALESCE(SUM(commission_amount), 0) as totalCommission,
+      COALESCE(SUM(CASE WHEN status='paid' THEN commission_amount ELSE 0 END), 0) as totalPaid,
+      COALESCE(SUM(CASE WHEN status='pending' THEN commission_amount ELSE 0 END), 0) as totalPending,
+      COALESCE(SUM(CASE WHEN status='unpaid' THEN commission_amount ELSE 0 END), 0) as totalUnpaid,
+      COUNT(*) as totalEntries
+    FROM entries
+  `).get();
+  const pendingCount = db.prepare("SELECT COUNT(*) as c FROM entries WHERE status='pending'").get().c;
+  const activePersonnel = db.prepare("SELECT COUNT(*) as c FROM users WHERE role='personnel' AND active=1").get().c;
+  const cycles = lastNCycles(8);
+  const ph = cycles.map(() => '?').join(',');
+  const trendRows = db.prepare(`
+    SELECT billing_cycle_date as cycle,
+      COALESCE(SUM(commission_amount), 0) as commission,
+      COALESCE(SUM(sale_amount), 0) as sales,
+      COUNT(*) as entry_count
+    FROM entries WHERE billing_cycle_date IN (${ph}) GROUP BY billing_cycle_date
+  `).all(...cycles);
+  const map = Object.fromEntries(trendRows.map(r => [r.cycle, r]));
+  const weeklyTrend = cycles.map(c => ({
+    cycle: c, commission: map[c]?.commission || 0, sales: map[c]?.sales || 0, entry_count: map[c]?.entry_count || 0
+  }));
+  const statusBreakdown = db.prepare(`
+    SELECT status, COUNT(*) as count, COALESCE(SUM(commission_amount),0) as amount
+    FROM entries WHERE billing_cycle_date = ? GROUP BY status
+  `).all(currentCycle);
+  const leaderboard = db.prepare(`
+    SELECT u.id as personnel_id, u.full_name,
+      COALESCE(SUM(e.commission_amount), 0) as commission,
+      COALESCE(SUM(e.sale_amount), 0) as sales,
+      COUNT(e.id) as entry_count
+    FROM users u LEFT JOIN entries e ON e.personnel_id = u.id AND e.billing_cycle_date = ?
+    WHERE u.role = 'personnel' AND u.active = 1
+    GROUP BY u.id ORDER BY commission DESC LIMIT 5
+  `).all(currentCycle);
+  res.json({ currentCycle, prevCycle, currentCycleStats: current, prevCycleStats: prev, totals, pendingCount, activePersonnel, weeklyTrend, statusBreakdown, leaderboard });
+});
+
+app.get('/api/admin/reports', authRequired, adminRequired, (req, res) => {
+  const { period = 'weekly' } = req.query;
+  let group;
+  if (period === 'weekly') group = 'billing_cycle_date';
+  else if (period === 'monthly') group = "substr(billing_cycle_date,1,7)";
+  else if (period === 'yearly') group = "substr(billing_cycle_date,1,4)";
+  else return res.status(400).json({ error: 'Invalid period' });
+  const rows = db.prepare(`
+    SELECT ${group} as period, COUNT(*) as entry_count,
+      COALESCE(SUM(sale_amount), 0) as total_sales,
+      COALESCE(SUM(commission_amount), 0) as total_commission,
+      COALESCE(SUM(CASE WHEN status='paid' THEN commission_amount ELSE 0 END), 0) as paid_commission,
+      COALESCE(SUM(CASE WHEN status='unpaid' THEN commission_amount ELSE 0 END), 0) as unpaid_commission,
+      COALESCE(SUM(CASE WHEN status='pending' THEN commission_amount ELSE 0 END), 0) as pending_commission
+    FROM entries GROUP BY ${group} ORDER BY period DESC
+  `).all();
+  res.json(rows);
+});
+
+app.get('/api/admin/reports/export', authRequired, adminRequired, (req, res) => {
+  const { from, to, cycle, status, personnel_id } = req.query;
+  let q = `
+    SELECT u.full_name as personnel, u.username, e.sale_date, e.description, e.sale_amount,
+      e.commission_rate, e.commission_amount, e.billing_cycle_date, e.status, e.notes, e.drive_link, e.created_at
+    FROM entries e JOIN users u ON u.id = e.personnel_id WHERE 1=1
+  `;
+  const p = [];
+  if (cycle) { q += ' AND e.billing_cycle_date = ?'; p.push(cycle); }
+  if (status) { q += ' AND e.status = ?'; p.push(status); }
+  if (personnel_id) { q += ' AND e.personnel_id = ?'; p.push(parseInt(personnel_id)); }
+  if (from) { q += ' AND e.sale_date >= ?'; p.push(from); }
+  if (to) { q += ' AND e.sale_date <= ?'; p.push(to); }
+  q += ' ORDER BY e.billing_cycle_date DESC, e.sale_date DESC';
+  const rows = db.prepare(q).all(...p);
+  const esc = (v) => { if (v == null) return ''; const s = String(v); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const headers = ['Personnel','Username','Sale Date','Description','Sale Amount','Rate %','Commission','Billing Cycle','Status','Notes','Drive Link','Created'];
+  const lines = [headers.join(',')];
+  for (const r of rows) lines.push([r.personnel, r.username, r.sale_date, r.description, r.sale_amount, r.commission_rate, r.commission_amount, r.billing_cycle_date, r.status, r.notes, r.drive_link, r.created_at].map(esc).join(','));
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="commission-report-${toYMD(new Date())}.csv"`);
+  res.send('﻿' + lines.join('\r\n'));  // BOM for Excel UTF-8
+});
+
+app.get('/api/admin/cycles', authRequired, adminRequired, (req, res) => {
+  const rows = db.prepare('SELECT DISTINCT billing_cycle_date FROM entries ORDER BY billing_cycle_date DESC').all();
+  res.json(rows.map(r => r.billing_cycle_date));
+});
+
+// ============ DRIVE LINKS ============
+app.get('/api/drive-links', authRequired, (req, res) => {
+  res.json(db.prepare('SELECT * FROM drive_links ORDER BY created_at DESC').all());
+});
+
+app.post('/api/admin/drive-links', authRequired, adminRequired, (req, res) => {
+  const { title, url, description } = req.body || {};
+  if (!title || !url) return res.status(400).json({ error: 'Missing fields' });
+  if (String(url).length > 2000) return res.status(400).json({ error: 'URL too long' });
+  const r = db.prepare('INSERT INTO drive_links (title, url, description) VALUES (?, ?, ?)').run(title.trim(), url.trim(), description?.trim() || null);
+  res.json(db.prepare('SELECT * FROM drive_links WHERE id = ?').get(r.lastInsertRowid));
+});
+
+app.patch('/api/admin/drive-links/:id', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  const { title, url, description } = req.body || {};
+  const updates = [], p = [];
+  if (title != null) { updates.push('title = ?'); p.push(title.trim()); }
+  if (url != null) { updates.push('url = ?'); p.push(url.trim()); }
+  if (description != null) { updates.push('description = ?'); p.push(description.trim()); }
+  if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
+  p.push(id);
+  db.prepare(`UPDATE drive_links SET ${updates.join(', ')} WHERE id = ?`).run(...p);
+  res.json(db.prepare('SELECT * FROM drive_links WHERE id = ?').get(id));
+});
+
+app.delete('/api/admin/drive-links/:id', authRequired, adminRequired, (req, res) => {
+  db.prepare('DELETE FROM drive_links WHERE id = ?').run(parseInt(req.params.id));
+  res.json({ ok: true });
+});
+
+// ============ HEALTH & ROUTING ============
+app.get('/health', (req, res) => {
+  try {
+    const c = db.prepare('SELECT 1 as ok').get();
+    res.json({ status: 'ok', db: c.ok === 1 ? 'ok' : 'fail', uptime: process.uptime() });
+  } catch (e) { res.status(503).json({ status: 'fail', error: e.message }); }
+});
+
+app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
+app.get('/personnel', (req, res) => res.sendFile(path.join(__dirname, 'public', 'personnel.html')));
+
+// ============ 404 + ERROR HANDLER ============
+app.use('/api/*', (req, res) => res.status(404).json({ error: 'Endpoint not found' }));
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  console.error('[error]', req.method, req.url, '->', err.message);
+  if (err instanceof multer.MulterError) return res.status(400).json({ error: err.message });
+  res.status(err.status || 500).json({ error: NODE_ENV === 'production' ? 'Internal server error' : err.message });
+});
+
+// ============ START + GRACEFUL SHUTDOWN ============
+const server = app.listen(PORT, () => {
+  console.log(`\n=====================================================`);
+  console.log(`  Solar Savings Direct — Commission Portal`);
+  console.log(`  Running at http://localhost:${PORT}  (env: ${NODE_ENV})`);
+  console.log(`  Default admin login — username: admin  password: admin123`);
+  console.log(`=====================================================\n`);
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n[server] Port ${PORT} is already in use.`);
+    console.error(`[server] Another process is listening on it. Stop it first, or run with a different port:`);
+    console.error(`[server]   PORT=3002 npm start\n`);
+  } else {
+    console.error('[server]', err.message);
+  }
+  process.exit(1);
+});
+
+function shutdown(sig) {
+  console.log(`\n[${sig}] Shutting down gracefully...`);
+  server.close(() => {
+    try { db.close(); } catch {}
+    console.log('[shutdown] Done.');
+    process.exit(0);
+  });
+  setTimeout(() => { console.error('[shutdown] Forced exit'); process.exit(1); }, 10000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('uncaughtException', (e) => { console.error('[uncaught]', e); shutdown('uncaughtException'); });
+process.on('unhandledRejection', (e) => { console.error('[unhandled]', e); });

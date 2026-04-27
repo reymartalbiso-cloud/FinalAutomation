@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In · Solar Savings Direct</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script>
+    tailwind = { config: { theme: { extend: { colors: {
+      indigo: { 50:'#eef2f7',100:'#d6dfeb',200:'#a6bad5',300:'#6c8cb7',400:'#3c649a',500:'#1e4d8c',600:'#0b2545',700:'#061a2e',800:'#04121f',900:'#020a13' },
+      violet: { 50:'#fff8e6',100:'#ffecb3',200:'#ffdc7a',300:'#ffcc42',400:'#ffb703',500:'#ffb703',600:'#fd9e02',700:'#d48001',800:'#9e5f01',900:'#6e4201' }
+    } } } } };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body class="min-h-screen login-bg">
+  <div class="min-h-screen flex">
+    <!-- Left: branding panel -->
+    <div class="hidden lg:flex lg:w-3/5 relative overflow-hidden text-white p-12 flex-col justify-between"
+         style="background: linear-gradient(135deg, #061a2e 0%, #0b2545 45%, #1e4d8c 100%);">
+      <!-- sun glow -->
+      <div class="absolute -top-24 -right-24 w-[28rem] h-[28rem] rounded-full"
+           style="background: radial-gradient(circle, rgba(255,183,3,0.45) 0%, rgba(255,183,3,0) 65%);"></div>
+      <div class="absolute -bottom-32 -left-32 w-[30rem] h-[30rem] rounded-full bg-[#1e4d8c]/30 blur-3xl"></div>
+
+      <div class="relative">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 rounded-xl bg-sun-gradient flex items-center justify-center text-white shadow-lg sun-pulse">
+            <i data-lucide="sun" class="w-6 h-6"></i>
+          </div>
+          <div>
+            <div class="font-bold text-lg leading-tight">Solar Savings Direct</div>
+            <div class="text-xs text-white/70">Commission Portal</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="relative max-w-lg">
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 backdrop-blur border border-white/20 text-xs font-medium mb-5">
+          <i data-lucide="award" class="w-3.5 h-3.5" style="color:#ffb703;"></i>
+          Voted #1 Solar Company in El Dorado County
+        </div>
+        <h1 class="text-4xl xl:text-5xl font-bold leading-tight">Every commission,<br/>tracked from sun-up to payout.</h1>
+        <p class="mt-6 text-white/80 text-lg leading-relaxed">
+          The internal team portal for California's #1 solar company. One clean source of truth
+          for sales, verification, and Friday billing cycles &mdash; no spreadsheets required.
+        </p>
+
+        <div class="grid grid-cols-2 gap-4 mt-10">
+          <div class="bg-white/10 backdrop-blur rounded-xl p-4 border border-white/10">
+            <i data-lucide="zap" class="w-5 h-5 mb-2" style="color:#ffb703;"></i>
+            <div class="font-semibold">Instant Sync</div>
+            <div class="text-sm text-white/70 mt-1">One source of truth for every install &amp; sale</div>
+          </div>
+          <div class="bg-white/10 backdrop-blur rounded-xl p-4 border border-white/10">
+            <i data-lucide="arrow-right-circle" class="w-5 h-5 mb-2" style="color:#ffb703;"></i>
+            <div class="font-semibold">Auto-rollover</div>
+            <div class="text-sm text-white/70 mt-1">Unpaid moves to next Friday cycle</div>
+          </div>
+          <div class="bg-white/10 backdrop-blur rounded-xl p-4 border border-white/10">
+            <i data-lucide="bar-chart-3" class="w-5 h-5 mb-2" style="color:#ffb703;"></i>
+            <div class="font-semibold">Live Reports</div>
+            <div class="text-sm text-white/70 mt-1">Weekly, monthly &amp; yearly insights</div>
+          </div>
+          <div class="bg-white/10 backdrop-blur rounded-xl p-4 border border-white/10">
+            <i data-lucide="shield-check" class="w-5 h-5 mb-2" style="color:#ffb703;"></i>
+            <div class="font-semibold">Full History</div>
+            <div class="text-sm text-white/70 mt-1">Every move tracked with a reason</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="relative text-sm text-white/60">&copy; Solar Savings Direct, Inc. &mdash; Serving California since 2010</div>
+    </div>
+
+    <!-- Right: form -->
+    <div class="flex-1 flex items-center justify-center p-6 lg:p-12">
+      <div class="w-full max-w-sm">
+        <div class="lg:hidden flex items-center gap-3 mb-8">
+          <div class="w-11 h-11 rounded-xl bg-sun-gradient flex items-center justify-center text-white"><i data-lucide="sun" class="w-5 h-5"></i></div>
+          <div>
+            <div class="font-bold text-lg text-slate-900 leading-tight">Solar Savings Direct</div>
+            <div class="text-xs text-slate-500">Commission Portal</div>
+          </div>
+        </div>
+
+        <h2 class="text-2xl font-bold text-slate-900">Welcome back</h2>
+        <p class="text-sm text-slate-500 mt-1 mb-8">Sign in to continue to your dashboard</p>
+
+        <form id="loginForm" class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1.5">Username</label>
+            <div class="relative">
+              <i data-lucide="user" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+              <input name="username" autocomplete="username" required
+                class="w-full pl-10 pr-3 py-2.5 border border-slate-300 rounded-lg outline-none" />
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1.5">Password</label>
+            <div class="relative">
+              <i data-lucide="lock" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+              <input name="password" type="password" autocomplete="current-password" required
+                class="w-full pl-10 pr-3 py-2.5 border border-slate-300 rounded-lg outline-none" />
+            </div>
+          </div>
+          <div id="error" class="hidden text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 flex items-center gap-2">
+            <i data-lucide="alert-circle" class="w-4 h-4 shrink-0"></i>
+            <span id="errorMessage"></span>
+          </div>
+          <button type="submit" id="submitBtn"
+            class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg transition shadow-sm hover:shadow-md flex items-center justify-center gap-2">
+            <span id="submitText">Sign in</span>
+            <i data-lucide="arrow-right" class="w-4 h-4" id="submitIcon"></i>
+          </button>
+        </form>
+
+        <div class="mt-8 text-xs text-slate-400 text-center border-t border-slate-200 pt-6">
+          Default admin: <code class="font-mono text-slate-600">admin / admin123</code>
+          <div class="mt-2">Remember to change the default password in Settings after first login.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/login.js"></script>
+  <script>if (window.lucide) lucide.createIcons();</script>
+</body>
+</html>
