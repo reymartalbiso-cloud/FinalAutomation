@@ -42,7 +42,8 @@
     <button data-tab="personnel" class="nav-item"><i data-lucide="users"></i><span>Personnel</span></button>
     <button data-tab="drive" class="nav-item"><i data-lucide="folder-open"></i><span>Drive Links</span></button>
     <button data-tab="reports" class="nav-item"><i data-lucide="bar-chart-3"></i><span>Reports</span></button>
-    <div class="pt-3 mt-3 border-t border-slate-800">
+    <button data-tab="audit" class="nav-item"><i data-lucide="history"></i><span>Activity Log</span></button>
+    <div class="pt-3 mt-3 border-t border-white/10">
       <button data-tab="settings" class="nav-item"><i data-lucide="settings"></i><span>Settings</span></button>
     </div>
   </nav>
@@ -198,10 +199,24 @@
       </div>
     </div>
 
+    <!-- Bulk action bar (appears when selections exist) -->
+    <div id="bulkBar" class="hidden bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-2.5 mb-3 flex items-center justify-between gap-3 flex-wrap">
+      <div class="text-sm font-medium text-indigo-900"><span id="bulkCount">0</span> selected</div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <button onclick="bulkAction('mark-paid')" class="inline-flex items-center gap-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 rounded-lg"><i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i>Mark Paid</button>
+        <button onclick="bulkAction('mark-unpaid')" class="inline-flex items-center gap-1.5 text-xs font-medium text-white bg-rose-600 hover:bg-rose-700 px-3 py-1.5 rounded-lg"><i data-lucide="x-circle" class="w-3.5 h-3.5"></i>Mark Unpaid</button>
+        <button onclick="bulkAction('mark-pending')" class="inline-flex items-center gap-1.5 text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 px-3 py-1.5 rounded-lg"><i data-lucide="clock" class="w-3.5 h-3.5"></i>Mark Pending</button>
+        <button onclick="bulkAction('transfer')" class="inline-flex items-center gap-1.5 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 px-3 py-1.5 rounded-lg"><i data-lucide="arrow-right-circle" class="w-3.5 h-3.5"></i>Transfer</button>
+        <button onclick="bulkAction('delete')" class="inline-flex items-center gap-1.5 text-xs font-medium text-rose-700 bg-white border border-rose-200 hover:bg-rose-50 px-3 py-1.5 rounded-lg"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i>Delete</button>
+        <button onclick="clearSelection()" class="text-xs font-medium text-slate-600 hover:text-slate-900 px-2 py-1.5">Clear</button>
+      </div>
+    </div>
+
     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
           <tr>
+            <th class="px-3 py-3 text-left w-10"><input type="checkbox" id="selectAllCheckbox" class="rounded border-slate-300" /></th>
             <th class="px-4 py-3 text-left">Date</th>
             <th class="px-4 py-3 text-left">Personnel</th>
             <th class="px-4 py-3 text-left">Description</th>
@@ -218,6 +233,41 @@
       </table>
     </div>
     <div id="entriesPagination" class="flex flex-wrap items-center justify-between gap-3 mt-3 px-1"></div>
+  </div>
+
+  <!-- ========= Audit Log ========= -->
+  <div data-panel="audit" class="p-6 lg:p-8 hidden animate-fade-in">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900">Activity Log</h1>
+        <p class="text-sm text-slate-500 mt-1">Every action on the system, in order &mdash; full accountability across the team</p>
+      </div>
+    </div>
+    <div class="stat-card mb-4">
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div class="md:col-span-2 relative">
+          <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+          <input id="auditSearchInput" placeholder="Search user, action, or details..." class="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm" />
+        </div>
+        <select id="auditActionFilter" class="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white"><option value="">All actions</option></select>
+        <select id="auditActorFilter" class="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white"><option value="">All users</option></select>
+      </div>
+    </div>
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+          <tr>
+            <th class="px-4 py-3 text-left">When</th>
+            <th class="px-4 py-3 text-left">User</th>
+            <th class="px-4 py-3 text-left">Action</th>
+            <th class="px-4 py-3 text-left">Target</th>
+            <th class="px-4 py-3 text-left">Details</th>
+          </tr>
+        </thead>
+        <tbody id="auditBody" class="divide-y divide-slate-100"></tbody>
+      </table>
+    </div>
+    <div id="auditPagination" class="flex flex-wrap items-center justify-between gap-3 mt-3 px-1"></div>
   </div>
 
   <!-- ========= Personnel ========= -->

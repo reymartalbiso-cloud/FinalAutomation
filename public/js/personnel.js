@@ -263,6 +263,23 @@ function setupEntryModal() {
     queueFiles(files);
   });
 
+  // Drag-and-drop on the dropzone label
+  const dropzone = document.querySelector('label[for="attachInput"]');
+  if (dropzone) {
+    ['dragenter', 'dragover'].forEach(ev => dropzone.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dropzone.classList.add('border-indigo-500', 'bg-indigo-50');
+    }));
+    ['dragleave', 'drop'].forEach(ev => dropzone.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dropzone.classList.remove('border-indigo-500', 'bg-indigo-50');
+    }));
+    dropzone.addEventListener('drop', (e) => {
+      const files = Array.from(e.dataTransfer?.files || []);
+      if (files.length) queueFiles(files);
+    });
+  }
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(form);

@@ -1,0 +1,14 @@
+node_modules
+data
+backups
+.git
+.gitignore
+.dockerignore
+Dockerfile
+*.log
+.env
+.env.*
+.vscode
+.idea
+tmp_test
+ecosystem.config.js

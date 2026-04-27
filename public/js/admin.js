@@ -8,7 +8,9 @@ const state = {
   driveLinks: [],
   cycles: [],
   stats: null,
-  filters: { search: '', cycle: '', status: '', personnel_id: '' }
+  filters: { search: '', cycle: '', status: '', personnel_id: '' },
+  selected: new Set(),
+  audit: { data: [], total: 0, page: 1, pageSize: 50, totalPages: 1, filters: { search: '', action: '', actor_id: '' } }
 };
 
 const charts = {};
@@ -29,6 +31,7 @@ if (user) {
   activateTab = setupTabs((tab) => {
     document.getElementById('sidebar').classList.remove('open');
     if (tab === 'reports') loadReports();
+    if (tab === 'audit') loadAuditLog();
   });
 
   init();
@@ -38,6 +41,8 @@ async function init() {
   await refresh();
   setupFilters();
   setupModals();
+  setupSelection();
+  setupAuditFilters();
   document.getElementById('reportPeriod').addEventListener('change', loadReports);
   document.getElementById('transferAllBtn').addEventListener('click', transferAllUnpaid);
   document.getElementById('exportCsvBtn').addEventListener('click', exportEntriesCsv);
@@ -314,15 +319,17 @@ window.changePageSize = async function(size) {
 function renderEntries() {
   const tbody = document.getElementById('entriesBody');
   if (!state.entries.length) {
-    tbody.innerHTML = `<tr><td colspan="10" class="px-4 py-10 text-center text-slate-500">
+    tbody.innerHTML = `<tr><td colspan="11" class="px-4 py-10 text-center text-slate-500">
       <i data-lucide="inbox" class="w-10 h-10 mx-auto mb-2 text-slate-300"></i>
       <div>No entries match your filters.</div>
     </td></tr>`;
     renderEntriesPagination();
+    updateBulkBar();
     return;
   }
   tbody.innerHTML = state.entries.map(e => `
-    <tr>
+    <tr class="${state.selected.has(e.id) ? 'bg-indigo-50/40' : ''}">
+      <td class="px-3 py-3 align-top"><input type="checkbox" class="row-check rounded border-slate-300" data-id="${e.id}" ${state.selected.has(e.id) ? 'checked' : ''} /></td>
       <td class="px-4 py-3 whitespace-nowrap text-slate-600 align-top">${fmtDate(e.sale_date)}</td>
       <td class="px-4 py-3 align-top">
         <div class="flex items-center gap-2">
@@ -358,6 +365,243 @@ function renderEntries() {
     </tr>
   `).join('');
   renderEntriesPagination();
+  updateBulkBar();
+}
+
+// ========== Selection & bulk actions ==========
+function setupSelection() {
+  // Delegated change handler on tbody
+  document.getElementById('entriesBody').addEventListener('change', (e) => {
+    const cb = e.target.closest('.row-check');
+    if (!cb) return;
+    const id = parseInt(cb.dataset.id);
+    if (cb.checked) state.selected.add(id);
+    else state.selected.delete(id);
+    cb.closest('tr')?.classList.toggle('bg-indigo-50/40', cb.checked);
+    updateBulkBar();
+    syncSelectAllCheckbox();
+  });
+  document.getElementById('selectAllCheckbox').addEventListener('change', (e) => {
+    const checked = e.target.checked;
+    state.entries.forEach(en => checked ? state.selected.add(en.id) : state.selected.delete(en.id));
+    document.querySelectorAll('.row-check').forEach(cb => {
+      cb.checked = checked;
+      cb.closest('tr')?.classList.toggle('bg-indigo-50/40', checked);
+    });
+    updateBulkBar();
+  });
+}
+
+function syncSelectAllCheckbox() {
+  const cb = document.getElementById('selectAllCheckbox');
+  if (!cb) return;
+  const visibleIds = state.entries.map(e => e.id);
+  const allChecked = visibleIds.length > 0 && visibleIds.every(id => state.selected.has(id));
+  const someChecked = visibleIds.some(id => state.selected.has(id));
+  cb.checked = allChecked;
+  cb.indeterminate = !allChecked && someChecked;
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById('bulkBar');
+  const count = state.selected.size;
+  document.getElementById('bulkCount').textContent = count;
+  bar.classList.toggle('hidden', count === 0);
+  bar.classList.toggle('flex', count !== 0);
+  syncSelectAllCheckbox();
+}
+
+window.clearSelection = function() {
+  state.selected.clear();
+  document.querySelectorAll('.row-check').forEach(cb => { cb.checked = false; cb.closest('tr')?.classList.remove('bg-indigo-50/40'); });
+  updateBulkBar();
+};
+
+window.bulkAction = async function(action) {
+  if (state.selected.size === 0) return;
+  const ids = Array.from(state.selected);
+  const count = ids.length;
+  try {
+    if (action === 'mark-paid' || action === 'mark-unpaid' || action === 'mark-pending') {
+      const status = action.replace('mark-', '');
+      const ok = await confirmDialog({
+        title: `Mark ${count} ${count === 1 ? 'entry' : 'entries'} as ${status}?`,
+        confirmText: 'Confirm',
+        danger: false
+      });
+      if (!ok) return;
+      const r = await API.fetch('/api/admin/entries/bulk-status', { method: 'POST', body: JSON.stringify({ ids, status }) });
+      toast(`${r.updated} ${r.updated === 1 ? 'entry' : 'entries'} marked as ${status}`, 'success');
+    } else if (action === 'transfer') {
+      const note = await promptDialog({ title: `Transfer ${count} ${count === 1 ? 'entry' : 'entries'}?`, message: 'Reason for moving them to the next cycle (required):', placeholder: 'e.g. Client requested delay', confirmText: 'Move' });
+      if (!note || !note.trim()) { if (note !== null) toast('Reason required', 'warn'); return; }
+      const r = await API.fetch('/api/admin/entries/bulk-transfer', { method: 'POST', body: JSON.stringify({ ids, note: note.trim() }) });
+      toast(`${r.moved} ${r.moved === 1 ? 'entry' : 'entries'} moved to next cycle`, 'success');
+    } else if (action === 'delete') {
+      const ok = await confirmDialog({
+        title: `Delete ${count} ${count === 1 ? 'entry' : 'entries'}?`,
+        message: 'This cannot be undone. Attached files will also be removed.',
+        confirmText: 'Delete',
+        danger: true
+      });
+      if (!ok) return;
+      const r = await API.fetch('/api/admin/entries/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) });
+      toast(`${r.deleted} ${r.deleted === 1 ? 'entry' : 'entries'} deleted`, 'success');
+    }
+    state.selected.clear();
+    await refresh();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+};
+
+// ========== Audit log ==========
+async function loadAuditLog() {
+  try {
+    const q = new URLSearchParams();
+    Object.entries(state.audit.filters).forEach(([k, v]) => { if (v) q.set(k, v); });
+    q.set('page', state.audit.page);
+    q.set('pageSize', state.audit.pageSize);
+    const [resp, actions] = await Promise.all([
+      API.fetch('/api/admin/audit-logs?' + q.toString()),
+      API.fetch('/api/admin/audit-actions')
+    ]);
+    state.audit.data = resp.data;
+    state.audit.total = resp.total;
+    state.audit.page = resp.page;
+    state.audit.totalPages = resp.totalPages;
+    populateAuditFilters(actions);
+    renderAuditLog();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function populateAuditFilters(actions) {
+  const aSel = document.getElementById('auditActionFilter');
+  const aVal = aSel.value;
+  aSel.innerHTML = '<option value="">All actions</option>' + actions.map(a => `<option value="${a}">${a}</option>`).join('');
+  aSel.value = aVal;
+  const pSel = document.getElementById('auditActorFilter');
+  const pVal = pSel.value;
+  // Build personnel list from already-loaded state.personnel + add a row for "admin"
+  const opts = [{ id: '', name: 'All users' }, { id: '__admin__', name: 'Admin' }, ...state.personnel.map(p => ({ id: p.id, name: p.full_name }))];
+  pSel.innerHTML = opts.map(o => `<option value="${o.id}">${escapeHtml(o.name)}</option>`).join('');
+  pSel.value = pVal;
+}
+
+function actionLabel(action) {
+  const map = {
+    'login.success': { icon: 'log-in', color: 'text-emerald-600 bg-emerald-50', label: 'Logged in' },
+    'login.failed': { icon: 'shield-alert', color: 'text-rose-600 bg-rose-50', label: 'Login failed' },
+    'password.changed': { icon: 'key', color: 'text-indigo-600 bg-indigo-50', label: 'Changed password' },
+    'entry.created': { icon: 'plus-circle', color: 'text-emerald-600 bg-emerald-50', label: 'Created entry' },
+    'entry.created_by_admin': { icon: 'plus-circle', color: 'text-emerald-600 bg-emerald-50', label: 'Created entry (admin)' },
+    'entry.edited': { icon: 'edit', color: 'text-amber-600 bg-amber-50', label: 'Edited entry' },
+    'entry.verified': { icon: 'check-circle-2', color: 'text-indigo-600 bg-indigo-50', label: 'Verified entry' },
+    'entry.deleted': { icon: 'trash-2', color: 'text-rose-600 bg-rose-50', label: 'Deleted entry' },
+    'entry.deleted_by_admin': { icon: 'trash-2', color: 'text-rose-600 bg-rose-50', label: 'Deleted entry (admin)' },
+    'entry.transferred': { icon: 'arrow-right-circle', color: 'text-amber-600 bg-amber-50', label: 'Transferred entry' },
+    'entry.cycle_rollover': { icon: 'arrow-right-circle', color: 'text-amber-600 bg-amber-50', label: 'Cycle rollover' },
+    'entry.bulk_status_changed': { icon: 'check-circle-2', color: 'text-indigo-600 bg-indigo-50', label: 'Bulk status change' },
+    'entry.bulk_transferred': { icon: 'arrow-right-circle', color: 'text-amber-600 bg-amber-50', label: 'Bulk transfer' },
+    'entry.bulk_deleted': { icon: 'trash-2', color: 'text-rose-600 bg-rose-50', label: 'Bulk delete' },
+    'attachment.uploaded': { icon: 'paperclip', color: 'text-indigo-600 bg-indigo-50', label: 'Uploaded files' },
+    'attachment.deleted': { icon: 'paperclip', color: 'text-rose-600 bg-rose-50', label: 'Deleted file' },
+    'personnel.created': { icon: 'user-plus', color: 'text-emerald-600 bg-emerald-50', label: 'Created personnel' },
+    'personnel.activated': { icon: 'user-check', color: 'text-emerald-600 bg-emerald-50', label: 'Activated personnel' },
+    'personnel.deactivated': { icon: 'user-x', color: 'text-rose-600 bg-rose-50', label: 'Deactivated personnel' },
+    'personnel.password_reset': { icon: 'key', color: 'text-amber-600 bg-amber-50', label: 'Reset password' },
+    'personnel.updated': { icon: 'edit', color: 'text-slate-600 bg-slate-50', label: 'Updated personnel' }
+  };
+  return map[action] || { icon: 'circle', color: 'text-slate-600 bg-slate-50', label: action };
+}
+
+function renderAuditLog() {
+  const tbody = document.getElementById('auditBody');
+  if (!state.audit.data.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="px-4 py-10 text-center text-slate-500">
+      <i data-lucide="history" class="w-10 h-10 mx-auto mb-2 text-slate-300"></i>
+      <div>No matching activity.</div>
+    </td></tr>`;
+    document.getElementById('auditPagination').innerHTML = '';
+    refreshIcons();
+    return;
+  }
+  tbody.innerHTML = state.audit.data.map(r => {
+    const lab = actionLabel(r.action);
+    let detail = '';
+    if (r.metadata) {
+      try {
+        const m = JSON.parse(r.metadata);
+        const parts = [];
+        if (m.status_from && m.status_to) parts.push(`${m.status_from} → ${m.status_to}`);
+        if (m.rate_from && m.rate_to && m.rate_from !== m.rate_to) parts.push(`${m.rate_from}% → ${m.rate_to}%`);
+        if (m.from && m.to) parts.push(`${m.from} → ${m.to}`);
+        if (m.cycle_from && m.cycle_to) parts.push(`${m.cycle_from} → ${m.cycle_to}`);
+        if (m.commission_amount != null) parts.push(`commission ${fmtMoney(m.commission_amount)}`);
+        if (m.count) parts.push(`${m.count} item${m.count === 1 ? '' : 's'}`);
+        if (m.affected) parts.push(`${m.affected} affected`);
+        if (m.deleted) parts.push(`${m.deleted} deleted`);
+        if (m.reason) parts.push(`"${m.reason}"`);
+        if (m.username && r.action === 'login.failed') parts.push(`username: ${m.username}`);
+        detail = parts.join(' · ');
+      } catch {}
+    }
+    const target = r.target_type ? `${r.target_type}${r.target_id ? ' #' + r.target_id : ''}` : '—';
+    return `
+      <tr>
+        <td class="px-4 py-3 whitespace-nowrap align-top text-slate-600 text-xs">${fmtRelative(r.created_at)}<div class="text-[10px] text-slate-400">${escapeHtml(r.created_at)}</div></td>
+        <td class="px-4 py-3 align-top">
+          <div class="font-medium text-slate-800">${escapeHtml(r.actor_username || '—')}</div>
+          <div class="text-xs text-slate-500">${escapeHtml(r.actor_role || '—')}${r.ip_address ? ' · ' + escapeHtml(r.ip_address) : ''}</div>
+        </td>
+        <td class="px-4 py-3 align-top">
+          <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium ${lab.color}">
+            <i data-lucide="${lab.icon}" class="w-3.5 h-3.5"></i>${lab.label}
+          </span>
+        </td>
+        <td class="px-4 py-3 whitespace-nowrap align-top text-slate-600 text-xs">${target}</td>
+        <td class="px-4 py-3 align-top text-xs text-slate-600">${escapeHtml(detail)}</td>
+      </tr>
+    `;
+  }).join('');
+  renderAuditPagination();
+  refreshIcons();
+}
+
+function renderAuditPagination() {
+  const el = document.getElementById('auditPagination');
+  const { page, totalPages, total, pageSize } = state.audit;
+  const from = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const to = Math.min(page * pageSize, total);
+  const btn = (label, p, disabled = false, active = false) => `
+    <button ${disabled ? 'disabled' : ''} ${p != null && !disabled && !active ? `onclick="auditGoToPage(${p})"` : ''}
+      class="px-3 py-1.5 text-sm rounded-lg border ${active ? 'bg-indigo-600 text-white border-indigo-600' : 'border-slate-200 text-slate-700 hover:bg-slate-50'} ${disabled ? 'opacity-40 cursor-not-allowed' : ''}">${label}</button>`;
+  const pages = [];
+  for (let p = 1; p <= totalPages; p++) {
+    if (p === 1 || p === totalPages || (p >= page - 2 && p <= page + 2)) pages.push(p);
+    else if (pages[pages.length - 1] !== '…') pages.push('…');
+  }
+  el.innerHTML = `
+    <div class="text-xs text-slate-500">Showing <strong class="text-slate-700">${from}–${to}</strong> of <strong class="text-slate-700">${total}</strong></div>
+    <div class="flex items-center gap-1">
+      ${btn('‹', page - 1, page <= 1)}
+      ${pages.map(p => p === '…' ? '<span class="px-2 text-slate-400">…</span>' : btn(p, p, false, p === page)).join('')}
+      ${btn('›', page + 1, page >= totalPages)}
+    </div>
+  `;
+}
+
+window.auditGoToPage = async function(p) {
+  if (p < 1 || p > state.audit.totalPages) return;
+  state.audit.page = p;
+  await loadAuditLog();
+};
+
+function setupAuditFilters() {
+  const debounce = (fn, d = 300) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), d); }; };
+  document.getElementById('auditSearchInput').addEventListener('input', debounce(e => { state.audit.filters.search = e.target.value; state.audit.page = 1; loadAuditLog(); }));
+  document.getElementById('auditActionFilter').addEventListener('change', e => { state.audit.filters.action = e.target.value; state.audit.page = 1; loadAuditLog(); });
+  document.getElementById('auditActorFilter').addEventListener('change', e => { state.audit.filters.actor_id = e.target.value === '__admin__' ? '1' : e.target.value; state.audit.page = 1; loadAuditLog(); });
 }
 
 function renderEntriesPagination() {

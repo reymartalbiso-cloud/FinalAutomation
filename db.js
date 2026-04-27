@@ -60,12 +60,29 @@ db.exec(`
     FOREIGN KEY (uploaded_by) REFERENCES users(id)
   );
 
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id INTEGER,
+    actor_username TEXT,
+    actor_role TEXT,
+    action TEXT NOT NULL,
+    target_type TEXT,
+    target_id INTEGER,
+    metadata TEXT,
+    ip_address TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
   CREATE INDEX IF NOT EXISTS idx_entries_personnel ON entries(personnel_id);
   CREATE INDEX IF NOT EXISTS idx_entries_cycle ON entries(billing_cycle_date);
   CREATE INDEX IF NOT EXISTS idx_entries_status ON entries(status);
   CREATE INDEX IF NOT EXISTS idx_entries_sale_date ON entries(sale_date);
   CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);
   CREATE INDEX IF NOT EXISTS idx_attachments_entry ON attachments(entry_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);
+  CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_logs(target_type, target_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
 `);
 
 const adminCount = db.prepare("SELECT COUNT(*) as c FROM users WHERE role='admin'").get().c;

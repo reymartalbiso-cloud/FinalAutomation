@@ -1,8 +1,9 @@
 # Dependencies
 node_modules/
 
-# Local data (SQLite DB, uploaded attachments)
+# Local data (SQLite DB, uploaded attachments) and backups
 data/
+backups/
 *.sqlite
 *.sqlite-journal
 *.sqlite-wal

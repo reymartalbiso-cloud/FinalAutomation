@@ -26,6 +26,9 @@ const UPLOAD_DIR = path.join(__dirname, 'data', 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // ============ MIDDLEWARE ============
+// Trust the first hop when behind a reverse proxy (nginx/Caddy); needed for accurate IPs in audit + rate limiter
+app.set('trust proxy', 1);
+
 app.use(helmet({
   // Allow CDN scripts/styles for Tailwind/Lucide/Chart.js. For tighter prod-grade CSP,
   // self-host these assets and re-enable CSP with explicit allowlist.
@@ -114,6 +117,35 @@ function deleteAttachmentFiles(entryId) {
   atts.forEach(a => safeUnlink(path.join(UPLOAD_DIR, a.filename)));
 }
 
+// ============ AUDIT LOG ============
+const insertAudit = db.prepare(`
+  INSERT INTO audit_logs (actor_id, actor_username, actor_role, action, target_type, target_id, metadata, ip_address)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+function audit(req, action, targetType = null, targetId = null, metadata = null) {
+  try {
+    const u = req.user || {};
+    const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
+    insertAudit.run(
+      u.id || null, u.username || null, u.role || null,
+      action, targetType, targetId,
+      metadata ? JSON.stringify(metadata).slice(0, 4000) : null,
+      ip || null
+    );
+  } catch (e) {
+    console.error('[audit] failed:', e.message);
+  }
+}
+
+// ============ STATS CACHE (60s TTL) ============
+const statsCache = { value: null, expiresAt: 0 };
+function invalidateStats() { statsCache.expiresAt = 0; }
+
+function prependTransferNote(existing, from, to, reason) {
+  const stamp = `[Moved ${from} → ${to}] ${reason}`;
+  return existing && existing.trim() ? `${stamp}\n\n${existing}` : stamp;
+}
+
 // ============ AUTH ============
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -128,12 +160,14 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
   if (!username || !password) return res.status(400).json({ error: 'Missing credentials' });
   const user = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(String(username).trim());
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+    audit({ user: { username: String(username).slice(0, 50) }, headers: req.headers, socket: req.socket }, 'login.failed', 'user', null, { username: String(username).slice(0, 50) });
     return res.status(401).json({ error: 'Invalid username or password' });
   }
   const token = jwt.sign(
     { id: user.id, username: user.username, role: user.role, full_name: user.full_name },
     JWT_SECRET, { expiresIn: '7d' }
   );
+  audit({ user: { id: user.id, username: user.username, role: user.role }, headers: req.headers, socket: req.socket }, 'login.success', 'user', user.id);
   res.json({ token, user: { id: user.id, username: user.username, role: user.role, full_name: user.full_name } });
 });
 
@@ -152,6 +186,7 @@ app.post('/api/auth/change-password', authRequired, (req, res) => {
     return res.status(401).json({ error: 'Current password is incorrect' });
   }
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(new_password, 10), req.user.id);
+  audit(req, 'password.changed', 'user', req.user.id);
   res.json({ ok: true });
 });
 
@@ -225,7 +260,10 @@ app.post('/api/personnel/entries', authRequired, (req, res) => {
     INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, billing_cycle_date, notes, drive_link)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(req.user.id, sale_date, description.trim(), sale, rate, commission, cycle, notes?.trim() || null, drive_link?.trim() || null);
-  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(result.lastInsertRowid));
+  const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(result.lastInsertRowid);
+  audit(req, 'entry.created', 'entry', entry.id, { sale_amount: sale, commission_amount: commission, cycle });
+  invalidateStats();
+  res.json(entry);
 });
 
 app.patch('/api/personnel/entries/:id', authRequired, (req, res) => {
@@ -244,6 +282,8 @@ app.patch('/api/personnel/entries/:id', authRequired, (req, res) => {
       sale_amount = ?, commission_amount = ?, notes = ?, drive_link = ?, updated_at = datetime('now')
     WHERE id = ?
   `).run(sale_date || null, description?.trim() || null, newSale, newCommission, notes?.trim() || null, drive_link?.trim() || null, id);
+  audit(req, 'entry.edited', 'entry', id, { sale_amount: newSale, commission_amount: newCommission });
+  invalidateStats();
   res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
 });
 
@@ -255,6 +295,8 @@ app.delete('/api/personnel/entries/:id', authRequired, (req, res) => {
   if (entry.status !== 'pending') return res.status(400).json({ error: 'Only pending entries can be deleted' });
   deleteAttachmentFiles(id);
   db.prepare('DELETE FROM entries WHERE id = ?').run(id);
+  audit(req, 'entry.deleted', 'entry', id, { description: entry.description, commission_amount: entry.commission_amount });
+  invalidateStats();
   res.json({ ok: true });
 });
 
@@ -317,7 +359,9 @@ app.post('/api/entries/:id/attachments',
       }
       return out;
     });
-    res.json({ uploaded: tx(req.files) });
+    const uploaded = tx(req.files);
+    audit(req, 'attachment.uploaded', 'entry', id, { count: uploaded.length, names: uploaded.map(u => u.original_name) });
+    res.json({ uploaded });
   }
 );
 
@@ -355,6 +399,7 @@ app.delete('/api/attachments/:id', authRequired, (req, res) => {
   }
   safeUnlink(path.join(UPLOAD_DIR, att.filename));
   db.prepare('DELETE FROM attachments WHERE id = ?').run(id);
+  audit(req, 'attachment.deleted', 'attachment', id, { name: att.original_name });
   res.json({ ok: true });
 });
 
@@ -402,7 +447,10 @@ app.post('/api/admin/entries', authRequired, adminRequired, (req, res) => {
     INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, status, billing_cycle_date, notes, drive_link)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(p.id, sale_date, description.trim(), sale, rate, (sale * rate) / 100, status || 'pending', billing_cycle_date || getCycleFridayInclusive(), notes?.trim() || null, drive_link?.trim() || null);
-  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(result.lastInsertRowid));
+  const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(result.lastInsertRowid);
+  audit(req, 'entry.created_by_admin', 'entry', entry.id, { personnel_id: p.id, sale_amount: sale, commission_amount: entry.commission_amount });
+  invalidateStats();
+  res.json(entry);
 });
 
 app.patch('/api/admin/entries/:id', authRequired, adminRequired, (req, res) => {
@@ -425,21 +473,78 @@ app.patch('/api/admin/entries/:id', authRequired, adminRequired, (req, res) => {
   `).run(status || null, newRate, newSale, newCommission, sale_date || null, description?.trim() || null,
          drive_link != null ? drive_link.trim() : null, notes != null ? notes.trim() : null,
          billing_cycle_date || null, id);
+  audit(req, 'entry.verified', 'entry', id, {
+    status_from: entry.status, status_to: status || entry.status,
+    rate_from: entry.commission_rate, rate_to: newRate,
+    commission_to: newCommission
+  });
+  invalidateStats();
   res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
 });
 
 app.delete('/api/admin/entries/:id', authRequired, adminRequired, (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+  const entry = db.prepare('SELECT description, commission_amount FROM entries WHERE id = ?').get(id);
   deleteAttachmentFiles(id);
   db.prepare('DELETE FROM entries WHERE id = ?').run(id);
+  audit(req, 'entry.deleted_by_admin', 'entry', id, entry || {});
+  invalidateStats();
   res.json({ ok: true });
 });
 
-function prependTransferNote(existing, from, to, reason) {
-  const stamp = `[Moved ${from} → ${to}] ${reason}`;
-  return existing && existing.trim() ? `${stamp}\n\n${existing}` : stamp;
+// ============ ADMIN: BULK ACTIONS ============
+function parseBulkIds(body) {
+  const ids = (body?.ids || []).map(x => parseInt(x)).filter(x => !isNaN(x));
+  if (ids.length === 0) throw new Error('No entries selected');
+  if (ids.length > 500) throw new Error('Too many entries (max 500 per batch)');
+  return ids;
 }
+
+app.post('/api/admin/entries/bulk-status', authRequired, adminRequired, (req, res) => {
+  let ids;
+  try { ids = parseBulkIds(req.body); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const { status } = req.body || {};
+  if (!['pending', 'paid', 'unpaid'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
+  const placeholders = ids.map(() => '?').join(',');
+  const result = db.prepare(
+    `UPDATE entries SET status = ?, updated_at = datetime('now') WHERE id IN (${placeholders})`
+  ).run(status, ...ids);
+  audit(req, 'entry.bulk_status_changed', 'entry', null, { ids, status, affected: result.changes });
+  invalidateStats();
+  res.json({ updated: result.changes, status });
+});
+
+app.post('/api/admin/entries/bulk-transfer', authRequired, adminRequired, (req, res) => {
+  let ids;
+  try { ids = parseBulkIds(req.body); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const { note } = req.body || {};
+  if (!note?.trim()) return res.status(400).json({ error: 'A reason is required' });
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db.prepare(`SELECT id, billing_cycle_date, notes FROM entries WHERE id IN (${placeholders})`).all(...ids);
+  const update = db.prepare("UPDATE entries SET billing_cycle_date = ?, status = 'pending', notes = ?, updated_at = datetime('now') WHERE id = ?");
+  db.transaction((list) => {
+    for (const e of list) {
+      const next = nextCycleAfter(e.billing_cycle_date);
+      const newNotes = prependTransferNote(e.notes, e.billing_cycle_date, next, note.trim());
+      update.run(next, newNotes, e.id);
+    }
+  })(rows);
+  audit(req, 'entry.bulk_transferred', 'entry', null, { ids, count: rows.length, reason: note.trim() });
+  invalidateStats();
+  res.json({ moved: rows.length });
+});
+
+app.post('/api/admin/entries/bulk-delete', authRequired, adminRequired, (req, res) => {
+  let ids;
+  try { ids = parseBulkIds(req.body); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const placeholders = ids.map(() => '?').join(',');
+  for (const id of ids) deleteAttachmentFiles(id);
+  const result = db.prepare(`DELETE FROM entries WHERE id IN (${placeholders})`).run(...ids);
+  audit(req, 'entry.bulk_deleted', 'entry', null, { ids, deleted: result.changes });
+  invalidateStats();
+  res.json({ deleted: result.changes });
+});
 
 app.post('/api/admin/entries/:id/transfer', authRequired, adminRequired, (req, res) => {
   const id = parseInt(req.params.id);
@@ -451,6 +556,8 @@ app.post('/api/admin/entries/:id/transfer', authRequired, adminRequired, (req, r
   const newNotes = prependTransferNote(entry.notes, entry.billing_cycle_date, next, note.trim());
   db.prepare("UPDATE entries SET billing_cycle_date = ?, status = 'pending', notes = ?, updated_at = datetime('now') WHERE id = ?")
     .run(next, newNotes, id);
+  audit(req, 'entry.transferred', 'entry', id, { from: entry.billing_cycle_date, to: next, reason: note.trim() });
+  invalidateStats();
   res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
 });
 
@@ -464,6 +571,8 @@ app.post('/api/admin/transfer-unpaid', authRequired, adminRequired, (req, res) =
   db.transaction((list) => {
     for (const e of list) update.run(next, prependTransferNote(e.notes, cycle, next, note.trim()), e.id);
   })(rows);
+  audit(req, 'entry.cycle_rollover', 'entry', null, { cycle_from: cycle, cycle_to: next, count: rows.length, reason: note.trim() });
+  invalidateStats();
   res.json({ moved: rows.length, nextCycle: next });
 });
 
@@ -496,6 +605,8 @@ app.post('/api/admin/personnel', authRequired, adminRequired, (req, res) => {
       INSERT INTO users (username, password_hash, role, full_name, default_commission_rate)
       VALUES (?, ?, 'personnel', ?, ?)
     `).run(String(username).trim(), hash, String(full_name).trim(), rate);
+    audit(req, 'personnel.created', 'user', r.lastInsertRowid, { username, full_name, default_commission_rate: rate });
+    invalidateStats();
     res.json({ id: r.lastInsertRowid, username, full_name, default_commission_rate: rate, active: 1 });
   } catch (e) {
     res.status(400).json({ error: e.message.includes('UNIQUE') ? 'Username already exists' : e.message });
@@ -521,11 +632,19 @@ app.patch('/api/admin/personnel/:id', authRequired, adminRequired, (req, res) =>
   params.push(id);
   const result = db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ? AND role = 'personnel'`).run(...params);
   if (!result.changes) return res.status(404).json({ error: 'Personnel not found' });
+  const action = password ? 'personnel.password_reset'
+    : (active != null ? (active ? 'personnel.activated' : 'personnel.deactivated') : 'personnel.updated');
+  audit(req, action, 'user', id, { fields: Object.keys(req.body || {}).filter(k => k !== 'password') });
+  invalidateStats();
   res.json(db.prepare('SELECT id, username, full_name, default_commission_rate, active FROM users WHERE id = ?').get(id));
 });
 
 // ============ ADMIN: STATS / REPORTS ============
 app.get('/api/admin/stats', authRequired, adminRequired, (req, res) => {
+  // Cached for 60s to absorb dashboard refresh storms
+  if (statsCache.value && statsCache.expiresAt > Date.now()) {
+    return res.json(statsCache.value);
+  }
   const currentCycle = getCycleFridayInclusive();
   const prevCycle = prevCycleBefore(currentCycle);
   const cycleStats = (cy) => db.prepare(`
@@ -578,7 +697,10 @@ app.get('/api/admin/stats', authRequired, adminRequired, (req, res) => {
     WHERE u.role = 'personnel' AND u.active = 1
     GROUP BY u.id ORDER BY commission DESC LIMIT 5
   `).all(currentCycle);
-  res.json({ currentCycle, prevCycle, currentCycleStats: current, prevCycleStats: prev, totals, pendingCount, activePersonnel, weeklyTrend, statusBreakdown, leaderboard });
+  const payload = { currentCycle, prevCycle, currentCycleStats: current, prevCycleStats: prev, totals, pendingCount, activePersonnel, weeklyTrend, statusBreakdown, leaderboard };
+  statsCache.value = payload;
+  statsCache.expiresAt = Date.now() + 60_000;
+  res.json(payload);
 });
 
 app.get('/api/admin/reports', authRequired, adminRequired, (req, res) => {
@@ -622,6 +744,31 @@ app.get('/api/admin/reports/export', authRequired, adminRequired, (req, res) => 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="commission-report-${toYMD(new Date())}.csv"`);
   res.send('﻿' + lines.join('\r\n'));  // BOM for Excel UTF-8
+});
+
+// ============ AUDIT LOG (read) ============
+app.get('/api/admin/audit-logs', authRequired, adminRequired, (req, res) => {
+  const { action, actor_id, target_type, target_id, from, to, search } = req.query;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
+  const offset = (page - 1) * pageSize;
+  let where = ' WHERE 1=1';
+  const params = [];
+  if (action) { where += ' AND action = ?'; params.push(action); }
+  if (actor_id) { where += ' AND actor_id = ?'; params.push(parseInt(actor_id)); }
+  if (target_type) { where += ' AND target_type = ?'; params.push(target_type); }
+  if (target_id) { where += ' AND target_id = ?'; params.push(parseInt(target_id)); }
+  if (from) { where += ' AND created_at >= ?'; params.push(from); }
+  if (to) { where += ' AND created_at <= ?'; params.push(to); }
+  if (search) { where += ' AND (actor_username LIKE ? OR action LIKE ? OR metadata LIKE ?)'; const s = `%${search}%`; params.push(s, s, s); }
+  const total = db.prepare(`SELECT COUNT(*) as c FROM audit_logs ${where}`).get(...params).c;
+  const data = db.prepare(`SELECT * FROM audit_logs ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, pageSize, offset);
+  res.json({ data, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) });
+});
+
+app.get('/api/admin/audit-actions', authRequired, adminRequired, (req, res) => {
+  const rows = db.prepare('SELECT DISTINCT action FROM audit_logs ORDER BY action').all();
+  res.json(rows.map(r => r.action));
 });
 
 app.get('/api/admin/cycles', authRequired, adminRequired, (req, res) => {
@@ -688,6 +835,11 @@ const server = app.listen(PORT, () => {
   console.log(`  Default admin login — username: admin  password: admin123`);
   console.log(`=====================================================\n`);
 });
+
+// HTTP timeouts to bound resource usage under load / slow clients
+server.requestTimeout = 30_000;       // 30s for whole request
+server.headersTimeout = 35_000;       // must be > requestTimeout
+server.keepAliveTimeout = 65_000;     // align with typical proxy settings
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
