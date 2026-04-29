@@ -410,6 +410,68 @@ function applyPrefill() {
   if (p.sale_amount) f.sale_amount.value = p.sale_amount;
   if (p.notes) f.notes.value = p.notes;
   updateBreakdown();
+  renderExtractedSummary(p);
+}
+
+function renderExtractedSummary(p) {
+  const el = document.getElementById('extractedSummary');
+  if (!el) return;
+  if (!p) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+
+  const conf = p.confidence || {};
+  const fields = [
+    { key: 'sale_amount',     label: 'Amount',       value: p.sale_amount     != null ? fmtMoney(p.sale_amount) : null,                     icon: 'dollar-sign' },
+    { key: 'salesperson_name',label: 'Commissioner', value: p.salesperson_name ? escapeHtml(p.salesperson_name) : null,                     icon: 'user-check' },
+    { key: 'customer_name',   label: 'Customer',     value: p.customer_name    ? escapeHtml(p.customer_name)    : null,                     icon: 'user' },
+    { key: 'sale_date',       label: 'Date',         value: p.sale_date        ? fmtDate(p.sale_date)           : null,                     icon: 'calendar' },
+    { key: 'description',     label: 'Item',         value: p.description      ? escapeHtml(p.description)      : null,                     icon: 'package' }
+  ];
+  const found = fields.filter(f => f.value);
+  if (!found.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+
+  // Soft warning if commissioner name is set and doesn't look like the logged-in personnel
+  let mismatchWarning = '';
+  if (p.salesperson_name && user?.full_name) {
+    const a = (p.salesperson_name || '').toLowerCase().replace(/[^a-z\s]/g, '').trim();
+    const b = (user.full_name || '').toLowerCase().replace(/[^a-z\s]/g, '').trim();
+    const aFirst = a.split(/\s+/)[0];
+    const bFirst = b.split(/\s+/)[0];
+    const aLast = a.split(/\s+/).slice(-1)[0];
+    const bLast = b.split(/\s+/).slice(-1)[0];
+    const looksLikeMatch = a === b || (aFirst && aFirst === bFirst) || (aLast && aLast === bLast) || a.includes(b) || b.includes(a);
+    if (!looksLikeMatch) {
+      mismatchWarning = `
+        <div class="mt-2 p-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-start gap-2">
+          <i data-lucide="alert-triangle" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i>
+          <span>Heads up — the PDF lists <strong>${escapeHtml(p.salesperson_name)}</strong> as commissioner, but you're signed in as <strong>${escapeHtml(user.full_name)}</strong>. Make sure this is your sale before submitting.</span>
+        </div>`;
+    }
+  }
+
+  el.classList.remove('hidden');
+  el.innerHTML = `
+    <div class="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3">
+      <div class="flex items-center gap-2 mb-2">
+        <div class="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center">
+          <i data-lucide="sparkles" class="w-4 h-4"></i>
+        </div>
+        <div class="font-semibold text-emerald-900 text-sm">We auto-filled ${found.length} ${found.length === 1 ? 'field' : 'fields'} from your PDF</div>
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        ${found.map(f => `
+          <div class="bg-white rounded-lg p-2 border border-emerald-100">
+            <div class="text-xs text-slate-500 flex items-center gap-1">
+              <i data-lucide="${f.icon}" class="w-3 h-3"></i>${f.label}
+              ${conf[f.key] ? `<span class="ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${conf[f.key] === 'high' ? 'bg-emerald-100 text-emerald-700' : conf[f.key] === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}">${conf[f.key]}</span>` : ''}
+            </div>
+            <div class="text-sm font-medium text-slate-900 truncate mt-0.5">${f.value}</div>
+          </div>
+        `).join('')}
+      </div>
+      ${mismatchWarning}
+    </div>
+  `;
+  refreshIcons();
 }
 
 function goToStep(n) {

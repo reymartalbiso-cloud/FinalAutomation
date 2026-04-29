@@ -166,54 +166,102 @@ const pdfUpload = multer({
   }
 });
 
+// Helper: scan multiple patterns and return first hit
+function firstMatch(text, patterns) {
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) return m;
+  }
+  return null;
+}
+
+// Helper: clean up a captured "name" string
+function cleanName(s) {
+  if (!s) return null;
+  return s
+    .split(/\n|\r/)[0]                    // first line only
+    .replace(/[\s,]+$/, '')               // trailing whitespace/commas
+    .replace(/\s+/g, ' ')                 // collapse spaces
+    .replace(/^[:#\s-]+/, '')             // leading punctuation
+    .trim()
+    .slice(0, 80);                        // max 80 chars
+}
+
 function extractFieldsFromText(text) {
-  if (!text) return {};
+  if (!text) return { confidence: {} };
   const t = text.replace(/\r/g, '');
   const out = { confidence: {} };
 
-  // 1. Sale amount: look for $XX,XXX.XX after Total/Amount/Grand Total/Sale
-  const totalMatch = t.match(/(?:Grand\s*Total|Total\s*(?:Due|Amount|Price)?|Amount\s*Due|Sale\s*(?:Amount|Total)|System\s*(?:Total|Cost)|Subtotal)\s*[:$]?\s*\$?\s*([\d,]+\.\d{2})/i)
-                 || t.match(/\$\s*([\d,]+\.\d{2})\s*$/m)
-                 || t.match(/\$\s*([\d,]+\.\d{2})/);
-  if (totalMatch) {
-    out.sale_amount = parseFloat(totalMatch[1].replace(/,/g, ''));
-    out.confidence.sale_amount = totalMatch[0].toLowerCase().includes('total') ? 'high' : 'medium';
+  // ============ 1. SALE AMOUNT ============
+  // Try labelled totals first (high confidence), fall back to last $X.XX (medium), then any $X.XX (low)
+  const labeledAmount = firstMatch(t, [
+    /(?:Grand\s*Total|Total\s*Due|Total\s*Amount(?:\s*Due)?|Final\s*Total|Final\s*Amount|Contract\s*Amount|Contract\s*Total|Sale\s*Price|Sale\s*Total|System\s*(?:Total|Cost|Price)|Project\s*Total|Net\s*Total|Amount\s*Due)\s*[:$]?\s*\$?\s*([\d,]+\.\d{2})/i,
+    /(?:Total|Subtotal|Amount)\s*[:$]?\s*\$?\s*([\d,]+\.\d{2})/i
+  ]);
+  if (labeledAmount) {
+    out.sale_amount = parseFloat(labeledAmount[1].replace(/,/g, ''));
+    out.confidence.sale_amount = /(grand|final|contract|total\s*due|total\s*amount|sale\s*price|sale\s*total|system|project|amount\s*due)/i.test(labeledAmount[0])
+      ? 'high' : 'medium';
+  } else {
+    // last dollar amount on its own line, often the "total" footer
+    const lastMatch = t.match(/\$\s*([\d,]+\.\d{2})\s*$/m) || t.match(/\$\s*([\d,]+\.\d{2})/);
+    if (lastMatch) {
+      out.sale_amount = parseFloat(lastMatch[1].replace(/,/g, ''));
+      out.confidence.sale_amount = 'low';
+    }
   }
 
-  // 2. Date: look for ISO or US-style dates
-  const dateMatch = t.match(/(?:Date|Issued|Invoice\s*Date|Sale\s*Date)\s*[:#]?\s*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2}|[A-Z][a-z]+\s+\d{1,2},?\s+\d{4})/i);
+  // ============ 2. SALE DATE ============
+  const dateMatch = firstMatch(t, [
+    /(?:Contract\s*Date|Sale\s*Date|Invoice\s*Date|Issue\s*Date|Issued|Date\s*of\s*Sale)\s*[:#]?\s*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2}|[A-Z][a-z]+\s+\d{1,2},?\s+\d{4})/i,
+    /(?:^|\n)\s*Date\s*[:#]?\s*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2}|[A-Z][a-z]+\s+\d{1,2},?\s+\d{4})/i
+  ]);
   if (dateMatch) {
-    const raw = dateMatch[1];
-    const d = new Date(raw);
+    const d = new Date(dateMatch[1]);
     if (!isNaN(d.getTime())) {
       out.sale_date = d.toISOString().slice(0, 10);
       out.confidence.sale_date = 'high';
     }
   }
 
-  // 3. Customer name: lines starting with Customer:/Bill To:/Sold To:
-  const custMatch = t.match(/(?:Customer|Bill\s*To|Sold\s*To|Client)\s*[:#]?\s*\n?\s*([A-Z][A-Za-z'.\s,-]{2,60})/);
+  // ============ 3. CUSTOMER NAME ============
+  const custMatch = firstMatch(t, [
+    /(?:Customer\s*Name|Bill\s*To|Sold\s*To|Buyer|Property\s*Owner|Homeowner|Client)\s*[:#]?\s*\n?\s*([A-Z][A-Za-z'.\s,&-]{2,60})/,
+    /(?:^|\n)\s*Customer\s*[:#]?\s*([A-Z][A-Za-z'.\s,&-]{2,60})/
+  ]);
   if (custMatch) {
-    out.customer_name = custMatch[1].split('\n')[0].trim();
+    out.customer_name = cleanName(custMatch[1]);
     out.confidence.customer_name = 'medium';
   }
 
-  // 4. Description: System size + product type
+  // ============ 4. SALESPERSON / COMMISSIONER NAME ============
+  // Look for many label variants used on solar + sales paperwork
+  const salesMatch = firstMatch(t, [
+    /(?:Salesperson|Sales\s*Person|Sales\s*Rep(?:resentative)?|Sales\s*Consultant|Sales\s*Agent|Sold\s*By|Closed\s*By|Closer|Set\s*By|Setter|Energy\s*Consultant|Commissioner|Commission\s*(?:Paid\s*)?To|Commission\s*Recipient|Account\s*Executive|Account\s*Manager|Agent\s*Name|Agent|Rep)\s*[:#]?\s*\n?\s*([A-Z][A-Za-z'.\s,-]{2,60})/i
+  ]);
+  if (salesMatch) {
+    out.salesperson_name = cleanName(salesMatch[1]);
+    // High confidence if label was specific (Salesperson, Sold By, etc.); medium if just "Agent"/"Rep"
+    out.confidence.salesperson_name = /(salesperson|sales\s*rep|sales\s*consultant|sales\s*agent|sold\s*by|closed\s*by|closer|setter|set\s*by|energy\s*consultant|commission|account\s*executive)/i.test(salesMatch[0])
+      ? 'high' : 'medium';
+  }
+
+  // ============ 5. DESCRIPTION (system size + battery) ============
   const sizeMatch = t.match(/(\d+\.?\d*)\s*kW(?:\s*(?:DC|AC))?\s*(?:solar|system|PV)?/i);
   const batteryMatch = t.match(/(Tesla\s+Powerwall(?:\s*\d)?|Powerwall|Enphase|battery\s+backup|EV\s+charger)/i);
   const descParts = [];
   if (sizeMatch) descParts.push(`${parseFloat(sizeMatch[1])}kW solar system`);
   if (batteryMatch) descParts.push(batteryMatch[1]);
   if (!descParts.length) {
-    const headlineMatch = t.match(/(Residential|Commercial)\s+Solar/i);
-    if (headlineMatch) descParts.push(`${headlineMatch[1]} solar installation`);
+    const headline = t.match(/(Residential|Commercial)\s+Solar/i);
+    if (headline) descParts.push(`${headline[1]} solar installation`);
   }
   if (descParts.length) {
     out.description = descParts.join(' + ');
     out.confidence.description = 'medium';
   }
 
-  // 5. Notes hint (rebate / financing)
+  // ============ 6. NOTES (rebate / credit) ============
   const rebateMatch = t.match(/(?:rebate|federal\s*tax\s*credit|ITC)\s*[:$]?\s*\$?\s*([\d,]+\.\d{2})/i);
   if (rebateMatch) {
     out.notes = `Rebate/credit identified: $${rebateMatch[1]}`;
@@ -236,22 +284,24 @@ app.post('/api/personnel/extract-pdf',
   },
   async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No PDF uploaded' });
+    let parser;
     try {
-      const pdfParse = require('pdf-parse');
-      const data = await pdfParse(req.file.buffer);
-      const fields = extractFieldsFromText(data.text || '');
-      audit(req, 'pdf.extracted', 'entry', null, { pages: data.numpages, fields_found: Object.keys(fields).filter(k => k !== 'confidence') });
-      res.json({
-        fields,
-        meta: {
-          pages: data.numpages,
-          text_length: (data.text || '').length,
-          info: data.info || null
-        }
-      });
+      const { PDFParse } = require('pdf-parse');
+      parser = new PDFParse({ data: req.file.buffer });
+      const textResult = await parser.getText();
+      const text = textResult?.text || '';
+      const pages = textResult?.pages?.length ?? textResult?.numpages ?? 0;
+      const fields = extractFieldsFromText(text);
+      audit(req, 'pdf.extracted', 'entry', null, { pages, fields_found: Object.keys(fields).filter(k => k !== 'confidence') });
+      res.json({ fields, meta: { pages, text_length: text.length } });
     } catch (e) {
       console.error('[pdf-extract]', e.message);
-      res.status(500).json({ error: 'Could not read this PDF. It may be encrypted or scanned. Please type the details in manually.' });
+      const msg = /password|encrypt/i.test(e.message)
+        ? 'This PDF is password-protected. Please remove the password or type details manually.'
+        : 'Could not read this PDF. It may be a scanned image. Please type details manually.';
+      res.status(500).json({ error: msg });
+    } finally {
+      try { await parser?.destroy?.(); } catch (_) {}
     }
   }
 );
