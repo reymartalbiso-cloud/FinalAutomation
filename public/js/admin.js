@@ -43,6 +43,9 @@ async function init() {
   setupModals();
   setupSelection();
   setupAuditFilters();
+  setupAdminPdfAutofill();
+  setupCrossCheck();
+  setupBulkImport();
   document.getElementById('reportPeriod').addEventListener('change', loadReports);
   document.getElementById('transferAllBtn').addEventListener('click', transferAllUnpaid);
   document.getElementById('exportCsvBtn').addEventListener('click', exportEntriesCsv);
@@ -942,6 +945,13 @@ function setupModals() {
     newEntryForm.reset();
     newEntryForm.querySelector('input[name="commission_rate"][value="70"]').checked = true;
     newEntryForm.sale_date.value = new Date().toISOString().slice(0, 10);
+    // reset PDF auto-fill UI
+    const status = document.getElementById('adminPdfStatus');
+    const ex = document.getElementById('adminPdfExtracted');
+    const hint = document.getElementById('personnelMatchHint');
+    if (status) { status.classList.add('hidden'); status.innerHTML = ''; }
+    if (ex) { ex.classList.add('hidden'); ex.innerHTML = ''; }
+    if (hint) hint.classList.add('hidden');
     openModal(newEntryModal);
     refreshIcons();
   });
@@ -1243,4 +1253,494 @@ async function handleChangePassword(e) {
     form.reset();
     toast('Password updated', 'success');
   } catch (err) { toast(err.message, 'error'); }
+}
+
+
+// ============================================================
+// PDF AUTO-FILL: Admin "Add Entry" modal
+// ============================================================
+function setupAdminPdfAutofill() {
+  const input = document.getElementById('adminPdfInput');
+  const dropzone = document.getElementById('adminPdfDropzone');
+  if (!input || !dropzone) return;
+
+  input.addEventListener('change', (e) => handleAdminPdf(e.target.files[0]));
+  setupDropzoneArea(dropzone, (files) => {
+    const pdf = files.find(f => f.type === 'application/pdf');
+    if (pdf) handleAdminPdf(pdf);
+    else toast('Please drop a PDF', 'warn');
+  });
+}
+
+function setupDropzoneArea(el, onFiles) {
+  ['dragenter', 'dragover'].forEach(evt => el.addEventListener(evt, (e) => {
+    e.preventDefault(); e.stopPropagation();
+    el.classList.add('border-indigo-500', 'bg-indigo-50');
+  }));
+  ['dragleave', 'drop'].forEach(evt => el.addEventListener(evt, (e) => {
+    e.preventDefault(); e.stopPropagation();
+    el.classList.remove('border-indigo-500', 'bg-indigo-50');
+  }));
+  el.addEventListener('drop', (e) => {
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length) onFiles(files);
+  });
+}
+
+async function extractPdf(file) {
+  if (!file) throw new Error('No file');
+  if (file.type !== 'application/pdf') throw new Error('Please upload a PDF');
+  if (file.size > 10 * 1024 * 1024) throw new Error('PDF too large (max 10MB)');
+  const fd = new FormData();
+  fd.append('pdf', file);
+  const res = await fetch('/api/personnel/extract-pdf', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + API.token() },
+    body: fd
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error(d.error || 'Could not read this PDF');
+  }
+  return res.json();
+}
+
+async function handleAdminPdf(file) {
+  if (!file) return;
+  const status = document.getElementById('adminPdfStatus');
+  status.classList.remove('hidden', 'text-rose-600', 'text-emerald-600');
+  status.classList.add('text-slate-600');
+  status.innerHTML = `<div class="inline-flex items-center gap-2"><div class="w-4 h-4 border-2 border-slate-300 border-t-slate-700 rounded-full animate-spin"></div>Reading "${escapeHtml(file.name)}"...</div>`;
+
+  try {
+    const result = await extractPdf(file);
+    const f = result.fields || {};
+    const found = Object.keys(f).filter(k => k !== 'confidence');
+
+    const form = document.getElementById('newAdminEntryForm');
+    if (f.sale_date) form.sale_date.value = f.sale_date;
+    if (f.sale_amount) form.sale_amount.value = f.sale_amount;
+    if (f.description) form.description.value = f.description;
+    if (f.customer_name && form.customer_name) form.customer_name.value = f.customer_name;
+    if (f.notes && form.notes) form.notes.value = f.notes;
+
+    const hint = document.getElementById('personnelMatchHint');
+    if (f.salesperson_name) {
+      const match = bestPersonnelMatch(state.personnel.filter(p => p.active), f.salesperson_name);
+      if (match) {
+        form.personnel_id.value = String(match.user.id);
+        hint.textContent = `Matched "${f.salesperson_name}" → ${match.user.full_name} (${Math.round(match.score * 100)}% confidence)`;
+        hint.className = 'text-xs text-emerald-700 mt-1';
+        hint.classList.remove('hidden');
+      } else {
+        hint.textContent = `Couldn't match "${f.salesperson_name}" to any personnel — please pick manually`;
+        hint.className = 'text-xs text-amber-700 mt-1';
+        hint.classList.remove('hidden');
+      }
+    } else {
+      hint.classList.add('hidden');
+    }
+
+    const ex = document.getElementById('adminPdfExtracted');
+    ex.innerHTML = renderExtractedPanel(f, found.length);
+    ex.classList.remove('hidden');
+
+    status.classList.remove('text-slate-600');
+    status.classList.add('text-emerald-600');
+    status.innerHTML = `<div class="inline-flex items-center gap-2"><i data-lucide="check-circle-2" class="w-4 h-4"></i>Filled ${found.length} field${found.length === 1 ? '' : 's'} from PDF</div>`;
+    refreshIcons();
+  } catch (e) {
+    status.classList.remove('text-slate-600', 'text-emerald-600');
+    status.classList.add('text-rose-600');
+    status.innerHTML = `<div class="inline-flex items-center gap-2"><i data-lucide="alert-circle" class="w-4 h-4"></i>${escapeHtml(e.message)}</div>`;
+    refreshIcons();
+  }
+}
+
+function renderExtractedPanel(f, foundCount) {
+  if (!foundCount) return '';
+  const conf = f.confidence || {};
+  const fields = [
+    { key: 'sale_amount',      label: 'Amount',       value: f.sale_amount != null ? fmtMoney(f.sale_amount) : null,     icon: 'dollar-sign' },
+    { key: 'salesperson_name', label: 'Commissioner', value: f.salesperson_name ? escapeHtml(f.salesperson_name) : null, icon: 'user-check' },
+    { key: 'customer_name',    label: 'Customer',     value: f.customer_name ? escapeHtml(f.customer_name) : null,       icon: 'user' },
+    { key: 'sale_date',        label: 'Date',         value: f.sale_date ? fmtDate(f.sale_date) : null,                  icon: 'calendar' },
+    { key: 'description',      label: 'Item',         value: f.description ? escapeHtml(f.description) : null,           icon: 'package' }
+  ].filter(x => x.value);
+  return `
+    <div class="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 mb-3">
+      <div class="flex items-center gap-2 mb-2">
+        <i data-lucide="sparkles" class="w-4 h-4 text-emerald-700"></i>
+        <div class="text-xs font-semibold text-emerald-900">Extracted from PDF</div>
+      </div>
+      <div class="grid grid-cols-2 gap-1.5 text-xs">
+        ${fields.map(x => `
+          <div class="bg-white rounded px-2 py-1.5 border border-emerald-100">
+            <div class="text-slate-500 flex items-center gap-1"><i data-lucide="${x.icon}" class="w-3 h-3"></i>${x.label}
+              ${conf[x.key] ? `<span class="ml-auto text-[10px] uppercase px-1 rounded ${conf[x.key] === 'high' ? 'bg-emerald-100 text-emerald-700' : conf[x.key] === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}">${conf[x.key]}</span>` : ''}
+            </div>
+            <div class="font-medium text-slate-900 truncate">${x.value}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// CROSS-CHECK: Verify modal — compare submitted vs PDF
+// ============================================================
+let crossCheckEntryId = null;
+
+function setupCrossCheck() {
+  const input = document.getElementById('crossCheckInput');
+  const dropzone = document.getElementById('crossCheckDropzone');
+  if (!input || !dropzone) return;
+  input.addEventListener('change', (e) => handleCrossCheck(e.target.files[0]));
+  setupDropzoneArea(dropzone, (files) => {
+    const pdf = files.find(f => f.type === 'application/pdf');
+    if (pdf) handleCrossCheck(pdf);
+    else toast('Please drop a PDF', 'warn');
+  });
+}
+
+async function handleCrossCheck(file) {
+  if (!file) return;
+  const entryId = document.getElementById('editEntryForm')?.id?.value;
+  const entry = state.entries.find(e => e.id === parseInt(entryId));
+  if (!entry) { toast('No entry loaded', 'error'); return; }
+  crossCheckEntryId = entry.id;
+
+  const status = document.getElementById('crossCheckStatus');
+  const result = document.getElementById('crossCheckResult');
+  status.classList.remove('hidden', 'text-rose-600');
+  status.classList.add('text-slate-600');
+  status.innerHTML = `<div class="inline-flex items-center gap-2"><div class="w-4 h-4 border-2 border-slate-300 border-t-slate-700 rounded-full animate-spin"></div>Reading PDF and comparing...</div>`;
+  result.innerHTML = '';
+
+  try {
+    const extracted = await extractPdf(file);
+    const f = extracted.fields || {};
+    const personnel = state.personnel.find(p => p.id === entry.personnel_id);
+
+    const rows = [
+      compareField('Personnel', personnel?.full_name, f.salesperson_name, 'name'),
+      compareField('Sale amount', entry.sale_amount, f.sale_amount, 'money'),
+      compareField('Customer', entry.customer_name, f.customer_name, 'name'),
+      compareField('Sale date', entry.sale_date, f.sale_date, 'date'),
+      compareField('Description', entry.description, f.description, 'text')
+    ];
+
+    const mismatches = rows.filter(r => r.status === 'mismatch').length;
+    const okCount = rows.filter(r => r.status === 'match').length;
+
+    status.classList.remove('text-slate-600');
+    status.classList.add(mismatches ? 'text-amber-700' : 'text-emerald-700');
+    status.innerHTML = mismatches
+      ? `<div class="inline-flex items-center gap-2"><i data-lucide="alert-triangle" class="w-4 h-4"></i>${mismatches} mismatch${mismatches === 1 ? '' : 'es'} · ${okCount} match${okCount === 1 ? '' : 'es'}</div>`
+      : `<div class="inline-flex items-center gap-2"><i data-lucide="check-circle-2" class="w-4 h-4"></i>Everything checks out (${okCount} match${okCount === 1 ? '' : 'es'})</div>`;
+
+    result.innerHTML = `
+      <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-50 text-slate-500 uppercase">
+            <tr>
+              <th class="px-3 py-2 text-left">Field</th>
+              <th class="px-3 py-2 text-left">Submitted</th>
+              <th class="px-3 py-2 text-left">From PDF</th>
+              <th class="px-3 py-2 text-center">Match</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            ${rows.map(r => `
+              <tr class="${r.status === 'mismatch' ? 'bg-amber-50/50' : ''}">
+                <td class="px-3 py-2 font-medium text-slate-700">${r.label}</td>
+                <td class="px-3 py-2 text-slate-700">${r.submittedDisplay || '<span class="text-slate-300">—</span>'}</td>
+                <td class="px-3 py-2 text-slate-700">${r.pdfDisplay || '<span class="text-slate-300">—</span>'}</td>
+                <td class="px-3 py-2 text-center">${
+                  r.status === 'match' ? '<i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-600 inline"></i>'
+                  : r.status === 'mismatch' ? '<i data-lucide="x-circle" class="w-4 h-4 text-rose-600 inline"></i>'
+                  : '<span class="text-slate-300">—</span>'
+                }</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${mismatches ? `
+        <div class="flex justify-end mt-2">
+          <button type="button" onclick="applyCrossCheckValues()" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg inline-flex items-center gap-1">
+            <i data-lucide="copy-check" class="w-3.5 h-3.5"></i> Apply PDF values to entry
+          </button>
+        </div>
+      ` : ''}
+    `;
+    window._crossCheckExtracted = f;
+    refreshIcons();
+  } catch (e) {
+    status.classList.remove('text-slate-600');
+    status.classList.add('text-rose-600');
+    status.innerHTML = `<div class="inline-flex items-center gap-2"><i data-lucide="alert-circle" class="w-4 h-4"></i>${escapeHtml(e.message)}</div>`;
+    refreshIcons();
+  }
+}
+
+function compareField(label, submitted, pdfValue, type) {
+  const both = submitted != null && submitted !== '' && pdfValue != null && pdfValue !== '';
+  const row = { label, submitted, pdfValue, status: 'unknown' };
+  if (type === 'money') {
+    row.submittedDisplay = submitted != null ? fmtMoney(submitted) : '';
+    row.pdfDisplay = pdfValue != null ? fmtMoney(pdfValue) : '';
+    if (both) row.status = moneyClose(submitted, pdfValue) ? 'match' : 'mismatch';
+  } else if (type === 'date') {
+    row.submittedDisplay = submitted ? fmtDate(submitted) : '';
+    row.pdfDisplay = pdfValue ? fmtDate(pdfValue) : '';
+    if (both) row.status = dateEqual(submitted, pdfValue) ? 'match' : 'mismatch';
+  } else if (type === 'name') {
+    row.submittedDisplay = escapeHtml(submitted || '');
+    row.pdfDisplay = escapeHtml(pdfValue || '');
+    if (both) row.status = nameSimilarity(submitted, pdfValue) >= 0.7 ? 'match' : 'mismatch';
+  } else {
+    row.submittedDisplay = escapeHtml(submitted || '');
+    row.pdfDisplay = escapeHtml(pdfValue || '');
+    if (both) {
+      const a = String(submitted).toLowerCase().trim();
+      const b = String(pdfValue).toLowerCase().trim();
+      row.status = (a === b || a.includes(b) || b.includes(a)) ? 'match' : 'mismatch';
+    }
+  }
+  return row;
+}
+
+window.applyCrossCheckValues = async function () {
+  const f = window._crossCheckExtracted;
+  if (!f || !crossCheckEntryId) return;
+  const ok = await confirmDialog({
+    title: 'Apply PDF values to this entry?',
+    message: 'The submitted values will be overwritten with what the PDF says.',
+    confirmText: 'Apply'
+  });
+  if (!ok) return;
+  const body = {};
+  if (f.sale_amount != null) body.sale_amount = f.sale_amount;
+  if (f.sale_date) body.sale_date = f.sale_date;
+  if (f.customer_name) body.customer_name = f.customer_name;
+  if (f.description) body.description = f.description;
+  try {
+    await API.fetch(`/api/admin/entries/${crossCheckEntryId}`, { method: 'PATCH', body: JSON.stringify(body) });
+    toast('Entry updated to match PDF', 'success');
+    closeModal(document.getElementById('editEntryModal'));
+    await refresh();
+  } catch (e) { toast(e.message, 'error'); }
+};
+
+// ============================================================
+// BULK IMPORT: drop many PDFs, review, create all
+// ============================================================
+const bulkState = { items: [] };
+
+function setupBulkImport() {
+  const input = document.getElementById('bulkPdfInput');
+  const dropzone = document.getElementById('bulkPdfDropzone');
+  if (!input || !dropzone) return;
+
+  input.addEventListener('change', (e) => {
+    handleBulkFiles(Array.from(e.target.files || []));
+    e.target.value = '';
+  });
+  setupDropzoneArea(dropzone, (files) => {
+    handleBulkFiles(files.filter(f => f.type === 'application/pdf'));
+  });
+
+  document.getElementById('bulkPdfClearBtn').addEventListener('click', () => {
+    bulkState.items = [];
+    renderBulkList();
+  });
+  document.getElementById('bulkPdfCreateBtn').addEventListener('click', bulkCreateAll);
+}
+
+async function handleBulkFiles(files) {
+  if (!files.length) return;
+  for (const file of files) {
+    if (file.size > 10 * 1024 * 1024) { toast(`"${file.name}" too large (max 10MB)`, 'warn'); continue; }
+    const id = Math.random().toString(36).slice(2, 9);
+    const item = { id, file, status: 'extracting', fields: null, error: null, personnelId: '', rate: 70 };
+    bulkState.items.push(item);
+    renderBulkList();
+    extractPdf(file)
+      .then((res) => {
+        item.fields = res.fields || {};
+        const match = item.fields.salesperson_name
+          ? bestPersonnelMatch(state.personnel.filter(p => p.active), item.fields.salesperson_name)
+          : null;
+        if (match) {
+          item.personnelId = match.user.id;
+          item.rate = match.user.default_commission_rate || 70;
+          item.matchScore = match.score;
+        }
+        item.status = 'ready';
+        renderBulkList();
+      })
+      .catch((e) => {
+        item.error = e.message;
+        item.status = 'error';
+        renderBulkList();
+      });
+  }
+}
+
+function renderBulkList() {
+  const list = document.getElementById('bulkPdfList');
+  const empty = document.getElementById('bulkPdfEmpty');
+  const toolbar = document.getElementById('bulkPdfToolbar');
+  if (!bulkState.items.length) {
+    list.innerHTML = '';
+    empty.classList.remove('hidden');
+    toolbar.classList.add('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  toolbar.classList.remove('hidden');
+  document.getElementById('bulkPdfCount').textContent = bulkState.items.filter(i => i.status === 'ready').length + ' / ' + bulkState.items.length;
+
+  const personnelOpts = state.personnel.filter(p => p.active).map(p => `<option value="${p.id}">${escapeHtml(p.full_name)}</option>`).join('');
+
+  list.innerHTML = bulkState.items.map(item => {
+    if (item.status === 'extracting') {
+      return `
+        <div class="bg-white border border-slate-200 rounded-xl p-4 flex items-center gap-3">
+          <div class="w-5 h-5 border-2 border-slate-300 border-t-indigo-600 rounded-full animate-spin"></div>
+          <div class="flex-1 text-sm text-slate-700 truncate">Reading <strong>${escapeHtml(item.file.name)}</strong>...</div>
+          <button onclick="removeBulkItem('${item.id}')" class="text-slate-400 hover:text-rose-600"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>`;
+    }
+    if (item.status === 'error') {
+      return `
+        <div class="bg-rose-50 border border-rose-200 rounded-xl p-4 flex items-start gap-3">
+          <i data-lucide="alert-circle" class="w-5 h-5 text-rose-600 mt-0.5 shrink-0"></i>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-medium text-slate-900 truncate">${escapeHtml(item.file.name)}</div>
+            <div class="text-xs text-rose-700 mt-1">${escapeHtml(item.error)}</div>
+          </div>
+          <button onclick="removeBulkItem('${item.id}')" class="text-slate-400 hover:text-rose-600"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>`;
+    }
+    if (item.status === 'created') {
+      return `
+        <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-center gap-3">
+          <i data-lucide="check-circle-2" class="w-5 h-5 text-emerald-600"></i>
+          <div class="flex-1 text-sm text-slate-700 truncate">Created entry <strong>#${item.createdId}</strong> from ${escapeHtml(item.file.name)}</div>
+        </div>`;
+    }
+    const f = item.fields || {};
+    const personnelOptsSelected = state.personnel.filter(p => p.active)
+      .map(p => `<option value="${p.id}" ${String(item.personnelId) === String(p.id) ? 'selected' : ''}>${escapeHtml(p.full_name)}</option>`).join('');
+    return `
+      <div class="bg-white border border-slate-200 rounded-xl p-4">
+        <div class="flex items-center justify-between mb-3 gap-3">
+          <div class="flex items-center gap-2 min-w-0">
+            <i data-lucide="file-text" class="w-4 h-4 text-rose-600 shrink-0"></i>
+            <div class="font-medium text-slate-900 truncate">${escapeHtml(item.file.name)}</div>
+          </div>
+          <button onclick="removeBulkItem('${item.id}')" class="text-slate-400 hover:text-rose-600 shrink-0"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+          <div>
+            <label class="text-xs text-slate-500">Personnel</label>
+            <select onchange="updateBulkItem('${item.id}','personnelId',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-slate-300 rounded text-sm bg-white">
+              <option value="">Select...</option>${personnelOptsSelected}
+            </select>
+            ${f.salesperson_name ? `<div class="text-xs ${item.matchScore >= 0.7 ? 'text-emerald-700' : 'text-amber-700'} mt-1">PDF says "${escapeHtml(f.salesperson_name)}"${item.matchScore ? ` (${Math.round(item.matchScore * 100)}% match)` : ''}</div>` : ''}
+          </div>
+          <div>
+            <label class="text-xs text-slate-500">Rate</label>
+            <select onchange="updateBulkItem('${item.id}','rate',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-slate-300 rounded text-sm bg-white">
+              <option value="70" ${item.rate == 70 ? 'selected' : ''}>70%</option>
+              <option value="30" ${item.rate == 30 ? 'selected' : ''}>30%</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-slate-500">Date</label>
+            <input type="date" value="${f.sale_date || ''}" onchange="updateBulkItem('${item.id}','date',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-slate-300 rounded text-sm" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-500">Sale ($)</label>
+            <input type="number" step="0.01" value="${f.sale_amount || ''}" onchange="updateBulkItem('${item.id}','sale',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-slate-300 rounded text-sm" />
+          </div>
+          <div class="md:col-span-2">
+            <label class="text-xs text-slate-500">Customer</label>
+            <input type="text" value="${escapeAttr(f.customer_name || '')}" onchange="updateBulkItem('${item.id}','customer',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-slate-300 rounded text-sm" />
+          </div>
+          <div class="md:col-span-2">
+            <label class="text-xs text-slate-500">Description</label>
+            <input type="text" value="${escapeAttr(f.description || '')}" onchange="updateBulkItem('${item.id}','description',this.value)" class="w-full mt-0.5 px-2 py-1.5 border border-slate-300 rounded text-sm" />
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  refreshIcons();
+}
+
+window.updateBulkItem = function (id, field, value) {
+  const item = bulkState.items.find(i => i.id === id);
+  if (!item) return;
+  if (field === 'personnelId') item.personnelId = value;
+  else if (field === 'rate') item.rate = parseInt(value);
+  else {
+    item.fields = item.fields || {};
+    if (field === 'date') item.fields.sale_date = value;
+    if (field === 'sale') item.fields.sale_amount = parseFloat(value);
+    if (field === 'customer') item.fields.customer_name = value;
+    if (field === 'description') item.fields.description = value;
+  }
+};
+
+window.removeBulkItem = function (id) {
+  bulkState.items = bulkState.items.filter(i => i.id !== id);
+  renderBulkList();
+};
+
+async function bulkCreateAll() {
+  const ready = bulkState.items.filter(i => i.status === 'ready');
+  if (!ready.length) { toast('Nothing to create', 'warn'); return; }
+  const missing = ready.filter(i => !i.personnelId || !i.fields?.sale_amount || !i.fields?.sale_date || !i.fields?.description);
+  if (missing.length) {
+    toast(`${missing.length} ${missing.length === 1 ? 'PDF is' : 'PDFs are'} missing required fields`, 'warn');
+    return;
+  }
+  const ok = await confirmDialog({
+    title: `Create ${ready.length} ${ready.length === 1 ? 'entry' : 'entries'}?`,
+    message: 'This will add all of these to the system.',
+    confirmText: 'Create all'
+  });
+  if (!ok) return;
+
+  let created = 0, failed = 0;
+  for (const item of ready) {
+    try {
+      const result = await API.fetch('/api/admin/entries', {
+        method: 'POST',
+        body: JSON.stringify({
+          personnel_id: parseInt(item.personnelId),
+          sale_date: item.fields.sale_date,
+          description: item.fields.description,
+          sale_amount: item.fields.sale_amount,
+          commission_rate: item.rate,
+          customer_name: item.fields.customer_name || null,
+          notes: 'Imported from PDF: ' + item.file.name
+        })
+      });
+      item.status = 'created';
+      item.createdId = result.id;
+      created++;
+    } catch (e) {
+      item.status = 'error';
+      item.error = e.message;
+      failed++;
+    }
+    renderBulkList();
+  }
+  toast(`${created} created, ${failed} failed`, failed ? 'warn' : 'success');
+  await refresh();
 }

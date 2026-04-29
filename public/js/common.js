@@ -299,6 +299,56 @@ function applyChartDefaults() {
 // ========== icon refresh ==========
 function refreshIcons() { if (window.lucide) lucide.createIcons(); }
 
+// ========== name matching (fuzzy) ==========
+function normalizeName(s) {
+  if (!s) return '';
+  return String(s).toLowerCase().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// Returns 0..1 similarity score between two names
+function nameSimilarity(a, b) {
+  const an = normalizeName(a);
+  const bn = normalizeName(b);
+  if (!an || !bn) return 0;
+  if (an === bn) return 1;
+  // tokens
+  const at = an.split(' ').filter(Boolean);
+  const bt = bn.split(' ').filter(Boolean);
+  if (!at.length || !bt.length) return 0;
+  // count matching tokens (first+last name overlap)
+  const setB = new Set(bt);
+  const overlap = at.filter(t => setB.has(t)).length;
+  if (overlap === 0) {
+    // substring fallback (e.g. "John D" vs "John Doe")
+    if (an.includes(bn) || bn.includes(an)) return 0.6;
+    return 0;
+  }
+  // 0.5 base + bonus per matching token
+  return Math.min(1, 0.5 + overlap * 0.25);
+}
+
+// Find the best-matching user (or null) from a list given an extracted name.
+// `users` = [{ id, full_name, ... }], `name` = extracted string. Returns { user, score } or null.
+function bestPersonnelMatch(users, name) {
+  if (!name || !users?.length) return null;
+  let best = null;
+  for (const u of users) {
+    const score = nameSimilarity(u.full_name, name);
+    if (!best || score > best.score) best = { user: u, score };
+  }
+  return best && best.score >= 0.5 ? best : null;
+}
+
+function moneyClose(a, b, tolerance = 1) {
+  if (a == null || b == null) return false;
+  return Math.abs(parseFloat(a) - parseFloat(b)) <= tolerance;
+}
+
+function dateEqual(a, b) {
+  if (!a || !b) return false;
+  return String(a).slice(0, 10) === String(b).slice(0, 10);
+}
+
 // ========== attachments helper ==========
 const ATTACHMENT_LIMITS = {
   maxFileSize: 10 * 1024 * 1024,
