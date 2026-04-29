@@ -1,6 +1,48 @@
 /* ===== base ===== */
+html { font-size: 16px; }   /* slightly larger base for readability */
 html, body { font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
 body { background-color: #f8fafc; color: #0f172a; }
+
+/* ===== comfort mode (personnel pages — bigger touch targets) ===== */
+.comfort-mode input:not([type="checkbox"]):not([type="radio"]),
+.comfort-mode select,
+.comfort-mode textarea {
+  min-height: 44px;
+  font-size: 0.95rem;
+}
+.comfort-mode .tab-btn {
+  padding: 0.875rem 1.125rem;
+  font-size: 0.95rem;
+}
+.comfort-mode .tab-btn i { width: 1.125rem; height: 1.125rem; }
+.comfort-mode .big-cta { font-size: 1rem; }
+
+/* ===== wizard step circles ===== */
+.step-circle {
+  width: 28px; height: 28px;
+  border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 0.875rem;
+  background: #e2e8f0; color: #64748b;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+.step-label { font-size: 0.85rem; color: #64748b; transition: all 0.2s ease; }
+
+/* ===== print pay stub ===== */
+@media print {
+  body * { visibility: hidden; }
+  .print-stub, .print-stub * { visibility: visible; }
+  .print-stub { position: absolute; top: 0; left: 0; width: 100%; padding: 2rem; }
+  .print-stub::before {
+    content: 'Solar Savings Direct — Pay Stub';
+    display: block;
+    font-size: 1.5rem;
+    font-weight: 800;
+    margin-bottom: 1rem;
+    color: #0b2545;
+  }
+}
 
 /* ===== Solar Savings Direct brand palette =====
    Navy (primary):  #0b2545  /  darker: #061a2e  /  lighter: #1e4d8c

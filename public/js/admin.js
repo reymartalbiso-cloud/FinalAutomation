@@ -53,19 +53,24 @@ async function init() {
 
 async function refresh() {
   try {
-    const [entriesResp, personnel, driveLinks, cycles, stats] = await Promise.all([
+    const [entriesResp, personnel, driveLinks, cycles, stats, digest, dups] = await Promise.all([
       fetchEntries(),
       API.fetch('/api/admin/personnel'),
       API.fetch('/api/drive-links'),
       API.fetch('/api/admin/cycles'),
-      API.fetch('/api/admin/stats')
+      API.fetch('/api/admin/stats'),
+      API.fetch('/api/admin/friday-digest'),
+      API.fetch('/api/admin/duplicates?days=14').catch(() => ({ duplicates: [] }))
     ]);
     applyEntriesResp(entriesResp);
     state.personnel = personnel;
     state.driveLinks = driveLinks;
     state.cycles = cycles;
     state.stats = stats;
+    state.digest = digest;
+    state.duplicates = dups.duplicates || [];
     renderDashboard();
+    renderDashAlerts();
     renderEntries();
     renderPersonnel();
     renderDriveLinks();
@@ -78,6 +83,90 @@ async function refresh() {
     toast(e.message, 'error');
   }
 }
+
+function renderDashAlerts() {
+  const el = document.getElementById('dashAlerts');
+  if (!el) return;
+  const blocks = [];
+  const d = state.digest;
+  if (d) {
+    const items = [];
+    if (d.pendingToVerify?.c > 0) {
+      items.push(`<span class="font-semibold">${d.pendingToVerify.c}</span> ${d.pendingToVerify.c === 1 ? 'sale needs' : 'sales need'} review (<span class="font-semibold">${fmtMoney(d.pendingToVerify.total)}</span>)`);
+    }
+    if (d.totalPayout > 0) items.push(`<span class="font-semibold">${fmtMoney(d.totalPayout)}</span> already paid this cycle`);
+    if (d.topPerformer?.full_name && d.topPerformer.total > 0) {
+      items.push(`Top performer: <span class="font-semibold">${escapeHtml(d.topPerformer.full_name)}</span> (${fmtMoney(d.topPerformer.total)})`);
+    }
+    if (items.length) {
+      blocks.push(`
+        <div class="rounded-2xl p-4 lg:p-5 text-white shadow-sm flex items-start gap-3"
+             style="background: linear-gradient(135deg, #0b2545 0%, #1e4d8c 100%);">
+          <div class="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+            <i data-lucide="${d.isFriday ? 'calendar-check' : 'sparkles'}" class="w-5 h-5"></i>
+          </div>
+          <div class="flex-1">
+            <div class="font-bold">${d.isFriday ? "It's payout Friday — here's the snapshot" : 'Cycle snapshot'}</div>
+            <div class="text-sm text-white/85 mt-1 leading-relaxed">${items.join(' &middot; ')}</div>
+          </div>
+        </div>
+      `);
+    }
+  }
+
+  if (state.duplicates && state.duplicates.length) {
+    blocks.push(`
+      <div class="rounded-2xl border border-amber-300 bg-amber-50 p-4 lg:p-5 flex items-start gap-3">
+        <div class="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+          <i data-lucide="alert-triangle" class="w-5 h-5"></i>
+        </div>
+        <div class="flex-1">
+          <div class="font-bold text-amber-900">Possible duplicate sales detected</div>
+          <div class="text-sm text-amber-800 mt-1">
+            ${state.duplicates.slice(0, 3).map(d => `<div>${escapeHtml(d.personnel_name)} — <strong>${fmtMoney(d.sale_amount)}</strong> for "${escapeHtml(d.match_key)}" appears <strong>${d.count}×</strong> in last 14 days</div>`).join('')}
+            ${state.duplicates.length > 3 ? `<div class="mt-1 text-xs text-amber-700">and ${state.duplicates.length - 3} more...</div>` : ''}
+          </div>
+          <button onclick="filterByDuplicates()" class="mt-3 text-xs font-semibold text-amber-900 hover:text-amber-700 underline">Review these sales →</button>
+        </div>
+      </div>
+    `);
+  }
+
+  el.innerHTML = blocks.join('');
+  refreshIcons();
+}
+
+function renderAdminBreakdown(e) {
+  const sale = e.sale_amount || 0;
+  const ded = e.deductions || 0;
+  const bon = e.bonuses || 0;
+  const base = Math.max(0, sale - ded);
+  const gross = (base * (e.commission_rate || 70)) / 100;
+  return `
+    <div class="rounded-xl border border-indigo-200 bg-indigo-50/40 p-4">
+      <div class="text-xs font-semibold text-indigo-900 uppercase tracking-wide mb-2">Commission Breakdown</div>
+      <dl class="text-sm space-y-1">
+        <div class="flex justify-between"><dt class="text-slate-600">Sale amount</dt><dd class="text-slate-900">${fmtMoney(sale)}</dd></div>
+        ${ded > 0 ? `<div class="flex justify-between"><dt class="text-slate-600">Less: deductions</dt><dd class="text-slate-900">−${fmtMoney(ded)}</dd></div>` : ''}
+        <div class="flex justify-between border-t border-indigo-200 pt-1.5 mt-1.5"><dt class="text-slate-700 font-medium">Commissionable base</dt><dd class="font-semibold text-slate-900">${fmtMoney(base)}</dd></div>
+        <div class="flex justify-between"><dt class="text-slate-600">× ${e.commission_rate}%</dt><dd class="text-slate-900">${fmtMoney(gross)}</dd></div>
+        ${bon > 0 ? `<div class="flex justify-between"><dt class="text-slate-600">+ Bonus</dt><dd class="text-slate-900">+${fmtMoney(bon)}</dd></div>` : ''}
+        <div class="flex justify-between border-t-2 border-indigo-300 pt-2 mt-1"><dt class="text-base font-bold text-indigo-900">Final payout</dt><dd class="text-base font-extrabold text-indigo-900">${fmtMoney(e.commission_amount)}</dd></div>
+      </dl>
+    </div>
+  `;
+}
+
+window.filterByDuplicates = function() {
+  if (!state.duplicates?.length) return;
+  // Filter the entries list to just those duplicate IDs by personnel of first group
+  const first = state.duplicates[0];
+  state.filters.personnel_id = String(first.personnel_id);
+  document.getElementById('personnelFilter').value = state.filters.personnel_id;
+  state.page = 1;
+  reloadEntries();
+  if (typeof activateTab === 'function') activateTab('entries');
+};
 
 function applyEntriesResp(resp) {
   state.entries = resp.data || [];
@@ -969,9 +1058,11 @@ window.openEdit = async function(id) {
       <div class="col-span-2"><span class="text-slate-500">Description:</span> <span class="font-medium text-slate-800">${escapeHtml(e.description)}</span></div>
       <div><span class="text-slate-500">Sale:</span> <span class="font-medium text-slate-800">${fmtMoney(e.sale_amount)}</span></div>
       <div><span class="text-slate-500">Current cycle:</span> <span class="font-medium text-slate-800">${fmtDate(e.billing_cycle_date)}</span></div>
+      ${e.customer_name ? `<div class="col-span-2"><span class="text-slate-500">Customer:</span> <span class="font-medium text-slate-800">${escapeHtml(e.customer_name)}</span></div>` : ''}
       ${e.drive_link ? `<div class="col-span-2"><a href="${escapeAttr(e.drive_link)}" target="_blank" rel="noopener" class="text-indigo-600 hover:underline inline-flex items-center gap-1"><i data-lucide="external-link" class="w-3 h-3"></i>View verification link</a></div>` : ''}
     </div>
   `;
+  document.getElementById('editEntryBreakdown').innerHTML = renderAdminBreakdown(e);
   document.getElementById('editEntryAttachments').innerHTML = `
     <div class="text-sm text-slate-500 flex items-center gap-2"><i data-lucide="paperclip" class="w-4 h-4"></i>Loading attachments...</div>
   `;

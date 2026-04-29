@@ -141,6 +141,121 @@ function audit(req, action, targetType = null, targetId = null, metadata = null)
 const statsCache = { value: null, expiresAt: 0 };
 function invalidateStats() { statsCache.expiresAt = 0; }
 
+// ============ NOTIFICATION QUEUE ============
+// Notifications are written to DB. A real SMTP/SMS sender would dequeue and send.
+// For now they're "queued" and visible in the admin notification log.
+const insertNotification = db.prepare(`
+  INSERT INTO notification_log (user_id, type, subject, body, target_type, target_id, status)
+  VALUES (?, ?, ?, ?, ?, ?, 'queued')
+`);
+function queueNotification(userId, type, subject, body, targetType = null, targetId = null) {
+  try {
+    insertNotification.run(userId, type, subject, body, targetType, targetId);
+  } catch (e) {
+    console.error('[notify] failed:', e.message);
+  }
+}
+
+// ============ PDF EXTRACTION ============
+const pdfUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') cb(null, true);
+    else cb(new Error('Only PDF files are accepted for extraction'));
+  }
+});
+
+function extractFieldsFromText(text) {
+  if (!text) return {};
+  const t = text.replace(/\r/g, '');
+  const out = { confidence: {} };
+
+  // 1. Sale amount: look for $XX,XXX.XX after Total/Amount/Grand Total/Sale
+  const totalMatch = t.match(/(?:Grand\s*Total|Total\s*(?:Due|Amount|Price)?|Amount\s*Due|Sale\s*(?:Amount|Total)|System\s*(?:Total|Cost)|Subtotal)\s*[:$]?\s*\$?\s*([\d,]+\.\d{2})/i)
+                 || t.match(/\$\s*([\d,]+\.\d{2})\s*$/m)
+                 || t.match(/\$\s*([\d,]+\.\d{2})/);
+  if (totalMatch) {
+    out.sale_amount = parseFloat(totalMatch[1].replace(/,/g, ''));
+    out.confidence.sale_amount = totalMatch[0].toLowerCase().includes('total') ? 'high' : 'medium';
+  }
+
+  // 2. Date: look for ISO or US-style dates
+  const dateMatch = t.match(/(?:Date|Issued|Invoice\s*Date|Sale\s*Date)\s*[:#]?\s*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2}|[A-Z][a-z]+\s+\d{1,2},?\s+\d{4})/i);
+  if (dateMatch) {
+    const raw = dateMatch[1];
+    const d = new Date(raw);
+    if (!isNaN(d.getTime())) {
+      out.sale_date = d.toISOString().slice(0, 10);
+      out.confidence.sale_date = 'high';
+    }
+  }
+
+  // 3. Customer name: lines starting with Customer:/Bill To:/Sold To:
+  const custMatch = t.match(/(?:Customer|Bill\s*To|Sold\s*To|Client)\s*[:#]?\s*\n?\s*([A-Z][A-Za-z'.\s,-]{2,60})/);
+  if (custMatch) {
+    out.customer_name = custMatch[1].split('\n')[0].trim();
+    out.confidence.customer_name = 'medium';
+  }
+
+  // 4. Description: System size + product type
+  const sizeMatch = t.match(/(\d+\.?\d*)\s*kW(?:\s*(?:DC|AC))?\s*(?:solar|system|PV)?/i);
+  const batteryMatch = t.match(/(Tesla\s+Powerwall(?:\s*\d)?|Powerwall|Enphase|battery\s+backup|EV\s+charger)/i);
+  const descParts = [];
+  if (sizeMatch) descParts.push(`${parseFloat(sizeMatch[1])}kW solar system`);
+  if (batteryMatch) descParts.push(batteryMatch[1]);
+  if (!descParts.length) {
+    const headlineMatch = t.match(/(Residential|Commercial)\s+Solar/i);
+    if (headlineMatch) descParts.push(`${headlineMatch[1]} solar installation`);
+  }
+  if (descParts.length) {
+    out.description = descParts.join(' + ');
+    out.confidence.description = 'medium';
+  }
+
+  // 5. Notes hint (rebate / financing)
+  const rebateMatch = t.match(/(?:rebate|federal\s*tax\s*credit|ITC)\s*[:$]?\s*\$?\s*([\d,]+\.\d{2})/i);
+  if (rebateMatch) {
+    out.notes = `Rebate/credit identified: $${rebateMatch[1]}`;
+  }
+
+  return out;
+}
+
+app.post('/api/personnel/extract-pdf',
+  authRequired,
+  (req, res, next) => {
+    pdfUpload.single('pdf')(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'PDF too large (max 10MB)' });
+        return res.status(400).json({ error: err.message });
+      }
+      if (err) return res.status(400).json({ error: err.message });
+      next();
+    });
+  },
+  async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No PDF uploaded' });
+    try {
+      const pdfParse = require('pdf-parse');
+      const data = await pdfParse(req.file.buffer);
+      const fields = extractFieldsFromText(data.text || '');
+      audit(req, 'pdf.extracted', 'entry', null, { pages: data.numpages, fields_found: Object.keys(fields).filter(k => k !== 'confidence') });
+      res.json({
+        fields,
+        meta: {
+          pages: data.numpages,
+          text_length: (data.text || '').length,
+          info: data.info || null
+        }
+      });
+    } catch (e) {
+      console.error('[pdf-extract]', e.message);
+      res.status(500).json({ error: 'Could not read this PDF. It may be encrypted or scanned. Please type the details in manually.' });
+    }
+  }
+);
+
 function prependTransferNote(existing, from, to, reason) {
   const stamp = `[Moved ${from} → ${to}] ${reason}`;
   return existing && existing.trim() ? `${stamp}\n\n${existing}` : stamp;
@@ -245,21 +360,35 @@ app.get('/api/personnel/me/stats', authRequired, (req, res) => {
   res.json({ currentCycle, totals, currentCycleStats, weeklyTrend, statusBreakdown });
 });
 
+function computeCommission(sale, rate, deductions = 0, bonuses = 0) {
+  const base = Math.max(0, (sale || 0) - (deductions || 0));
+  const gross = (base * rate) / 100;
+  return Math.max(0, gross + (bonuses || 0));
+}
+
+function safeNumber(v, fallback = 0) {
+  const n = parseFloat(v);
+  if (isNaN(n) || n < 0 || n > 1e9) return fallback;
+  return n;
+}
+
 app.post('/api/personnel/entries', authRequired, (req, res) => {
   if (req.user.role !== 'personnel') return res.status(403).json({ error: 'Personnel only' });
-  const { sale_date, description, sale_amount, notes, drive_link } = req.body || {};
+  const { sale_date, description, sale_amount, notes, drive_link, customer_name, deductions, bonuses } = req.body || {};
   if (!sale_date || !description || sale_amount == null) return res.status(400).json({ error: 'Missing required fields' });
   const sale = parseFloat(sale_amount);
   if (isNaN(sale) || sale < 0 || sale > 1e9) return res.status(400).json({ error: 'Invalid sale amount' });
   if (String(description).length > 500) return res.status(400).json({ error: 'Description too long (max 500 chars)' });
+  const ded = safeNumber(deductions, 0);
+  const bon = safeNumber(bonuses, 0);
   const u = db.prepare('SELECT default_commission_rate FROM users WHERE id = ?').get(req.user.id);
   const rate = u?.default_commission_rate || 70;
-  const commission = (sale * rate) / 100;
+  const commission = computeCommission(sale, rate, ded, bon);
   const cycle = getCycleFridayInclusive();
   const result = db.prepare(`
-    INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, billing_cycle_date, notes, drive_link)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(req.user.id, sale_date, description.trim(), sale, rate, commission, cycle, notes?.trim() || null, drive_link?.trim() || null);
+    INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, billing_cycle_date, notes, drive_link, customer_name, deductions, bonuses)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(req.user.id, sale_date, description.trim(), sale, rate, commission, cycle, notes?.trim() || null, drive_link?.trim() || null, customer_name?.trim() || null, ded, bon);
   const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(result.lastInsertRowid);
   audit(req, 'entry.created', 'entry', entry.id, { sale_amount: sale, commission_amount: commission, cycle });
   invalidateStats();
@@ -273,15 +402,20 @@ app.patch('/api/personnel/entries/:id', authRequired, (req, res) => {
   const entry = db.prepare('SELECT * FROM entries WHERE id = ? AND personnel_id = ?').get(id, req.user.id);
   if (!entry) return res.status(404).json({ error: 'Not found' });
   if (entry.status !== 'pending') return res.status(400).json({ error: 'Only pending entries can be edited' });
-  const { sale_date, description, sale_amount, notes, drive_link } = req.body || {};
+  const { sale_date, description, sale_amount, notes, drive_link, customer_name, deductions, bonuses } = req.body || {};
   const newSale = sale_amount != null ? parseFloat(sale_amount) : entry.sale_amount;
   if (isNaN(newSale) || newSale < 0 || newSale > 1e9) return res.status(400).json({ error: 'Invalid sale amount' });
-  const newCommission = (newSale * entry.commission_rate) / 100;
+  const ded = deductions != null ? safeNumber(deductions, 0) : entry.deductions || 0;
+  const bon = bonuses != null ? safeNumber(bonuses, 0) : entry.bonuses || 0;
+  const newCommission = computeCommission(newSale, entry.commission_rate, ded, bon);
   db.prepare(`
     UPDATE entries SET sale_date = COALESCE(?, sale_date), description = COALESCE(?, description),
-      sale_amount = ?, commission_amount = ?, notes = ?, drive_link = ?, updated_at = datetime('now')
+      sale_amount = ?, commission_amount = ?, notes = ?, drive_link = ?, customer_name = ?,
+      deductions = ?, bonuses = ?, updated_at = datetime('now')
     WHERE id = ?
-  `).run(sale_date || null, description?.trim() || null, newSale, newCommission, notes?.trim() || null, drive_link?.trim() || null, id);
+  `).run(sale_date || null, description?.trim() || null, newSale, newCommission,
+         notes?.trim() || null, drive_link?.trim() || null, customer_name?.trim() || null,
+         ded, bon, id);
   audit(req, 'entry.edited', 'entry', id, { sale_amount: newSale, commission_amount: newCommission });
   invalidateStats();
   res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
@@ -435,7 +569,7 @@ app.get('/api/admin/entries', authRequired, adminRequired, (req, res) => {
 });
 
 app.post('/api/admin/entries', authRequired, adminRequired, (req, res) => {
-  const { personnel_id, sale_date, description, sale_amount, commission_rate, status, notes, drive_link, billing_cycle_date } = req.body || {};
+  const { personnel_id, sale_date, description, sale_amount, commission_rate, status, notes, drive_link, billing_cycle_date, customer_name, deductions, bonuses } = req.body || {};
   if (!personnel_id || !sale_date || !description || sale_amount == null) return res.status(400).json({ error: 'Missing required fields' });
   const sale = parseFloat(sale_amount);
   if (isNaN(sale) || sale < 0 || sale > 1e9) return res.status(400).json({ error: 'Invalid sale amount' });
@@ -443,12 +577,17 @@ app.post('/api/admin/entries', authRequired, adminRequired, (req, res) => {
   if (!p) return res.status(400).json({ error: 'Personnel not found' });
   const rate = commission_rate != null ? parseInt(commission_rate) : (p.default_commission_rate || 70);
   if (![30, 70].includes(rate)) return res.status(400).json({ error: 'Rate must be 30 or 70' });
+  const ded = safeNumber(deductions, 0);
+  const bon = safeNumber(bonuses, 0);
+  const commission = computeCommission(sale, rate, ded, bon);
   const result = db.prepare(`
-    INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, status, billing_cycle_date, notes, drive_link)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(p.id, sale_date, description.trim(), sale, rate, (sale * rate) / 100, status || 'pending', billing_cycle_date || getCycleFridayInclusive(), notes?.trim() || null, drive_link?.trim() || null);
+    INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, status, billing_cycle_date, notes, drive_link, customer_name, deductions, bonuses)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(p.id, sale_date, description.trim(), sale, rate, commission, status || 'pending',
+         billing_cycle_date || getCycleFridayInclusive(), notes?.trim() || null,
+         drive_link?.trim() || null, customer_name?.trim() || null, ded, bon);
   const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(result.lastInsertRowid);
-  audit(req, 'entry.created_by_admin', 'entry', entry.id, { personnel_id: p.id, sale_amount: sale, commission_amount: entry.commission_amount });
+  audit(req, 'entry.created_by_admin', 'entry', entry.id, { personnel_id: p.id, sale_amount: sale, commission_amount: commission });
   invalidateStats();
   res.json(entry);
 });
@@ -457,27 +596,36 @@ app.patch('/api/admin/entries/:id', authRequired, adminRequired, (req, res) => {
   const id = parseInt(req.params.id);
   const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
   if (!entry) return res.status(404).json({ error: 'Not found' });
-  const { status, commission_rate, notes, billing_cycle_date, sale_amount, sale_date, description, drive_link } = req.body || {};
+  const { status, commission_rate, notes, billing_cycle_date, sale_amount, sale_date, description, drive_link, customer_name, deductions, bonuses } = req.body || {};
   if (status && !['pending', 'paid', 'unpaid'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
   const newRate = commission_rate != null ? parseInt(commission_rate) : entry.commission_rate;
   if (![30, 70].includes(newRate)) return res.status(400).json({ error: 'Rate must be 30 or 70' });
   const newSale = sale_amount != null ? parseFloat(sale_amount) : entry.sale_amount;
   if (isNaN(newSale) || newSale < 0 || newSale > 1e9) return res.status(400).json({ error: 'Invalid sale amount' });
-  const newCommission = (newSale * newRate) / 100;
+  const ded = deductions != null ? safeNumber(deductions, 0) : entry.deductions || 0;
+  const bon = bonuses != null ? safeNumber(bonuses, 0) : entry.bonuses || 0;
+  const newCommission = computeCommission(newSale, newRate, ded, bon);
   db.prepare(`
     UPDATE entries SET status = COALESCE(?, status), commission_rate = ?, sale_amount = ?, commission_amount = ?,
       sale_date = COALESCE(?, sale_date), description = COALESCE(?, description),
       drive_link = COALESCE(?, drive_link), notes = COALESCE(?, notes),
+      customer_name = COALESCE(?, customer_name),
+      deductions = ?, bonuses = ?,
       billing_cycle_date = COALESCE(?, billing_cycle_date), updated_at = datetime('now')
     WHERE id = ?
   `).run(status || null, newRate, newSale, newCommission, sale_date || null, description?.trim() || null,
          drive_link != null ? drive_link.trim() : null, notes != null ? notes.trim() : null,
+         customer_name != null ? customer_name.trim() : null, ded, bon,
          billing_cycle_date || null, id);
   audit(req, 'entry.verified', 'entry', id, {
     status_from: entry.status, status_to: status || entry.status,
     rate_from: entry.commission_rate, rate_to: newRate,
     commission_to: newCommission
   });
+  // Queue notification if status changed to paid
+  if (status === 'paid' && entry.status !== 'paid') {
+    queueNotification(entry.personnel_id, 'commission.paid', 'Your commission was paid', `Your commission of $${newCommission.toFixed(2)} for "${entry.description}" was marked as paid.`, 'entry', id);
+  }
   invalidateStats();
   res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
 });
@@ -747,6 +895,153 @@ app.get('/api/admin/reports/export', authRequired, adminRequired, (req, res) => 
 });
 
 // ============ AUDIT LOG (read) ============
+// ============ PAY SUMMARY (personnel) ============
+app.get('/api/personnel/me/pay-summary', authRequired, (req, res) => {
+  const uid = req.user.id;
+  const currentCycle = getCycleFridayInclusive();
+
+  const upcomingPayout = db.prepare(`
+    SELECT
+      COUNT(*) as count,
+      COALESCE(SUM(commission_amount), 0) as total
+    FROM entries
+    WHERE personnel_id = ? AND billing_cycle_date = ? AND status != 'unpaid'
+  `).get(uid, currentCycle);
+
+  const lifetimeTotals = db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN status='paid' THEN commission_amount ELSE 0 END), 0) as paid,
+      COALESCE(SUM(CASE WHEN status='pending' THEN commission_amount ELSE 0 END), 0) as pending,
+      COALESCE(SUM(CASE WHEN status='unpaid' THEN commission_amount ELSE 0 END), 0) as unpaid
+    FROM entries WHERE personnel_id = ?
+  `).get(uid);
+
+  const payHistory = db.prepare(`
+    SELECT billing_cycle_date as cycle,
+      COUNT(*) as count,
+      COALESCE(SUM(commission_amount), 0) as total
+    FROM entries
+    WHERE personnel_id = ? AND status = 'paid'
+    GROUP BY billing_cycle_date
+    ORDER BY billing_cycle_date DESC
+    LIMIT 12
+  `).all(uid);
+
+  const cycleEntries = db.prepare(`
+    SELECT id, sale_date, description, sale_amount, commission_rate, commission_amount, status, deductions, bonuses, customer_name
+    FROM entries
+    WHERE personnel_id = ? AND billing_cycle_date = ?
+    ORDER BY sale_date DESC, id DESC
+  `).all(uid, currentCycle);
+
+  const yearStart = new Date().getFullYear() + '-01-01';
+  const ytd = db.prepare(`
+    SELECT COALESCE(SUM(commission_amount), 0) as total
+    FROM entries WHERE personnel_id = ? AND status='paid' AND billing_cycle_date >= ?
+  `).get(uid, yearStart).total;
+
+  res.json({ currentCycle, upcomingPayout, lifetimeTotals, payHistory, cycleEntries, ytd });
+});
+
+// ============ FRIDAY DIGEST (admin) ============
+app.get('/api/admin/friday-digest', authRequired, adminRequired, (req, res) => {
+  const currentCycle = getCycleFridayInclusive();
+  const pendingToVerify = db.prepare(`
+    SELECT COUNT(*) as c, COALESCE(SUM(commission_amount), 0) as total
+    FROM entries WHERE billing_cycle_date = ? AND status = 'pending'
+  `).get(currentCycle);
+
+  const totalPayout = db.prepare(`
+    SELECT COALESCE(SUM(commission_amount), 0) as total
+    FROM entries WHERE billing_cycle_date = ? AND status = 'paid'
+  `).get(currentCycle).total;
+
+  const topPerformer = db.prepare(`
+    SELECT u.full_name, COALESCE(SUM(e.commission_amount), 0) as total, COUNT(e.id) as entry_count
+    FROM users u LEFT JOIN entries e ON e.personnel_id = u.id AND e.billing_cycle_date = ?
+    WHERE u.role = 'personnel' AND u.active = 1
+    GROUP BY u.id
+    ORDER BY total DESC
+    LIMIT 1
+  `).get(currentCycle);
+
+  const newPersonnelEntries = db.prepare(`
+    SELECT COUNT(*) as c FROM entries WHERE created_at >= datetime('now', '-7 days')
+  `).get().c;
+
+  const isFriday = new Date().getDay() === 5;
+
+  res.json({
+    currentCycle,
+    isFriday,
+    pendingToVerify,
+    totalPayout,
+    topPerformer,
+    newPersonnelEntries
+  });
+});
+
+// ============ DUPLICATE DETECTION (admin) ============
+app.get('/api/admin/duplicates', authRequired, adminRequired, (req, res) => {
+  const days = Math.min(90, Math.max(1, parseInt(req.query.days) || 14));
+  const since = new Date(); since.setDate(since.getDate() - days);
+  const sinceStr = toYMD(since);
+
+  // Group entries by (personnel + sale_amount + customer_name OR description) within date window
+  const groups = db.prepare(`
+    SELECT
+      e.personnel_id,
+      u.full_name as personnel_name,
+      e.sale_amount,
+      COALESCE(e.customer_name, e.description) as match_key,
+      COUNT(*) as count,
+      GROUP_CONCAT(e.id) as entry_ids,
+      GROUP_CONCAT(e.sale_date) as sale_dates
+    FROM entries e
+    JOIN users u ON u.id = e.personnel_id
+    WHERE e.sale_date >= ?
+    GROUP BY e.personnel_id, e.sale_amount, COALESCE(e.customer_name, e.description)
+    HAVING COUNT(*) > 1
+    ORDER BY count DESC, e.personnel_id
+  `).all(sinceStr);
+
+  const result = groups.map(g => ({
+    personnel_id: g.personnel_id,
+    personnel_name: g.personnel_name,
+    sale_amount: g.sale_amount,
+    match_key: g.match_key,
+    count: g.count,
+    entry_ids: g.entry_ids.split(',').map(n => parseInt(n)),
+    sale_dates: g.sale_dates.split(',')
+  }));
+
+  res.json({ window_days: days, duplicates: result });
+});
+
+// ============ NOTIFICATIONS LOG (admin) ============
+app.get('/api/admin/notifications', authRequired, adminRequired, (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 25));
+  const total = db.prepare('SELECT COUNT(*) as c FROM notification_log').get().c;
+  const data = db.prepare(`
+    SELECT n.*, u.full_name as user_name, u.username
+    FROM notification_log n
+    LEFT JOIN users u ON u.id = n.user_id
+    ORDER BY n.created_at DESC, n.id DESC
+    LIMIT ? OFFSET ?
+  `).all(pageSize, (page - 1) * pageSize);
+  res.json({ data, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) });
+});
+
+app.get('/api/personnel/me/notifications', authRequired, (req, res) => {
+  const rows = db.prepare(`
+    SELECT id, type, subject, body, target_type, target_id, status, created_at
+    FROM notification_log WHERE user_id = ?
+    ORDER BY created_at DESC LIMIT 50
+  `).all(req.user.id);
+  res.json(rows);
+});
+
 app.get('/api/admin/audit-logs', authRequired, adminRequired, (req, res) => {
   const { action, actor_id, target_type, target_id, from, to, search } = req.query;
   const page = Math.max(1, parseInt(req.query.page) || 1);

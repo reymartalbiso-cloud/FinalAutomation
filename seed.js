@@ -104,10 +104,18 @@ for (let ci = 0; ci < cycles.length; ci++) {
     const notes = hasNotes ? pick(['Rush order', 'Repeat customer', 'Needs follow-up', 'Verified via invoice', 'Paid in full', 'Partial payment received', 'Referred by existing client']) : null;
     const driveLink = hasDriveLink ? `https://drive.google.com/drive/folders/sample-${Math.floor(Math.random()*100000)}` : null;
 
+    const hasDeduction = Math.random() < 0.2;
+    const hasBonus = Math.random() < 0.15;
+    const deductions = hasDeduction ? Math.round(saleAmount * 0.05 / 100) * 100 : 0;
+    const bonuses = hasBonus ? money(100, 800) : 0;
+    const base = Math.max(0, saleAmount - deductions);
+    const finalCommission = (base * rate) / 100 + bonuses;
+    const customers = ['Smith Family', 'Garcia Residence', 'Patel Home', 'Johnson Property', 'Lee Family Farm', 'Walker Estate', 'Nguyen Household', 'Ali Family', 'Anderson Ranch', null];
+    const customer = pick(customers);
     db.prepare(`
-      INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, status, billing_cycle_date, notes, drive_link)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(personnelId, saleDate, pick(products), saleAmount, rate, commission, status, cycle, notes, driveLink);
+      INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, status, billing_cycle_date, notes, drive_link, customer_name, deductions, bonuses)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(personnelId, saleDate, pick(products), saleAmount, rate, finalCommission, status, cycle, notes, driveLink, customer, deductions, bonuses);
     totalEntries++;
   }
 }

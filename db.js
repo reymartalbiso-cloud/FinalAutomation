@@ -73,6 +73,21 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS notification_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    target_type TEXT,
+    target_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','sent','failed','skipped')),
+    sent_at TEXT,
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   CREATE INDEX IF NOT EXISTS idx_entries_personnel ON entries(personnel_id);
   CREATE INDEX IF NOT EXISTS idx_entries_cycle ON entries(billing_cycle_date);
   CREATE INDEX IF NOT EXISTS idx_entries_status ON entries(status);
@@ -83,7 +98,29 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_id);
   CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_logs(target_type, target_id);
   CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+  CREATE INDEX IF NOT EXISTS idx_notif_user ON notification_log(user_id);
+  CREATE INDEX IF NOT EXISTS idx_notif_status ON notification_log(status);
 `);
+
+// ===== Migrations: add columns if missing =====
+function columnExists(table, col) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col);
+}
+if (!columnExists('entries', 'deductions')) {
+  db.exec("ALTER TABLE entries ADD COLUMN deductions REAL NOT NULL DEFAULT 0");
+}
+if (!columnExists('entries', 'bonuses')) {
+  db.exec("ALTER TABLE entries ADD COLUMN bonuses REAL NOT NULL DEFAULT 0");
+}
+if (!columnExists('entries', 'customer_name')) {
+  db.exec("ALTER TABLE entries ADD COLUMN customer_name TEXT");
+}
+if (!columnExists('users', 'email')) {
+  db.exec("ALTER TABLE users ADD COLUMN email TEXT");
+}
+if (!columnExists('users', 'phone')) {
+  db.exec("ALTER TABLE users ADD COLUMN phone TEXT");
+}
 
 const adminCount = db.prepare("SELECT COUNT(*) as c FROM users WHERE role='admin'").get().c;
 if (adminCount === 0) {
