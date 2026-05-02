@@ -86,6 +86,11 @@ function adminRequired(req, res, next) {
   next();
 }
 
+function surveyorRequired(req, res, next) {
+  if (req.user?.role !== 'surveyor') return res.status(403).json({ error: 'Surveyor only' });
+  next();
+}
+
 // ============ FILE UPLOAD CONFIG ============
 const ALLOWED_MIME = new Set([
   'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif',
@@ -489,7 +494,8 @@ app.get('/api/entries/:id/attachments', authRequired, (req, res) => {
   const id = parseInt(req.params.id);
   const entry = db.prepare('SELECT personnel_id FROM entries WHERE id = ?').get(id);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
-  if (req.user.role !== 'admin' && req.user.id !== entry.personnel_id) {
+  // admin and surveyor can see any entry's attachments; personnel only their own
+  if (req.user.role === 'personnel' && req.user.id !== entry.personnel_id) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   const rows = db.prepare(`
@@ -517,7 +523,8 @@ app.post('/api/entries/:id/attachments',
     const entry = db.prepare('SELECT personnel_id, status FROM entries WHERE id = ?').get(id);
     const cleanup = () => req.files?.forEach(f => safeUnlink(f.path));
     if (!entry) { cleanup(); return res.status(404).json({ error: 'Entry not found' }); }
-    if (req.user.role !== 'admin' && req.user.id !== entry.personnel_id) {
+    // admin and surveyor can attach to any entry; personnel only their own
+    if (req.user.role === 'personnel' && req.user.id !== entry.personnel_id) {
       cleanup(); return res.status(403).json({ error: 'Forbidden' });
     }
     if (req.user.role === 'personnel' && entry.status !== 'pending') {
@@ -557,7 +564,7 @@ app.get('/api/attachments/:id', authRequired, (req, res) => {
     WHERE a.id = ?
   `).get(id);
   if (!att) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'admin' && req.user.id !== att.personnel_id) {
+  if (req.user.role === 'personnel' && req.user.id !== att.personnel_id) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   const filePath = path.join(UPLOAD_DIR, att.filename);
@@ -776,36 +783,39 @@ app.post('/api/admin/transfer-unpaid', authRequired, adminRequired, (req, res) =
 
 // ============ ADMIN: PERSONNEL ============
 app.get('/api/admin/personnel', authRequired, adminRequired, (req, res) => {
+  // Returns BOTH personnel and surveyors with role info
   const rows = db.prepare(`
-    SELECT u.id, u.username, u.full_name, u.default_commission_rate, u.active, u.created_at,
+    SELECT u.id, u.username, u.full_name, u.role, u.default_commission_rate, u.active, u.created_at,
       COALESCE(SUM(e.sale_amount), 0) as total_sales,
       COALESCE(SUM(e.commission_amount), 0) as total_commission,
       COALESCE(SUM(CASE WHEN e.status='paid' THEN e.commission_amount ELSE 0 END), 0) as total_paid,
       COALESCE(SUM(CASE WHEN e.status!='paid' THEN e.commission_amount ELSE 0 END), 0) as total_pending,
-      COUNT(e.id) as entry_count
+      COUNT(e.id) as entry_count,
+      (SELECT COUNT(*) FROM entries WHERE site_visited_by = u.id) as visits_done
     FROM users u LEFT JOIN entries e ON e.personnel_id = u.id
-    WHERE u.role = 'personnel'
-    GROUP BY u.id ORDER BY u.full_name
+    WHERE u.role IN ('personnel','surveyor')
+    GROUP BY u.id ORDER BY u.role, u.full_name
   `).all();
   res.json(rows);
 });
 
 app.post('/api/admin/personnel', authRequired, adminRequired, (req, res) => {
-  const { username, password, full_name, default_commission_rate } = req.body || {};
+  const { username, password, full_name, default_commission_rate, role } = req.body || {};
   if (!username || !password || !full_name) return res.status(400).json({ error: 'Missing fields' });
   if (String(username).length > 50 || String(full_name).length > 100) return res.status(400).json({ error: 'Field too long' });
   if (String(password).length < 4) return res.status(400).json({ error: 'Password too short (min 4 chars)' });
+  const userRole = role === 'surveyor' ? 'surveyor' : 'personnel';
   const rate = parseInt(default_commission_rate) || 70;
   if (![30, 70].includes(rate)) return res.status(400).json({ error: 'Rate must be 30 or 70' });
   const hash = bcrypt.hashSync(password, 10);
   try {
     const r = db.prepare(`
       INSERT INTO users (username, password_hash, role, full_name, default_commission_rate)
-      VALUES (?, ?, 'personnel', ?, ?)
-    `).run(String(username).trim(), hash, String(full_name).trim(), rate);
-    audit(req, 'personnel.created', 'user', r.lastInsertRowid, { username, full_name, default_commission_rate: rate });
+      VALUES (?, ?, ?, ?, ?)
+    `).run(String(username).trim(), hash, userRole, String(full_name).trim(), rate);
+    audit(req, userRole + '.created', 'user', r.lastInsertRowid, { username, full_name, role: userRole });
     invalidateStats();
-    res.json({ id: r.lastInsertRowid, username, full_name, default_commission_rate: rate, active: 1 });
+    res.json({ id: r.lastInsertRowid, username, full_name, role: userRole, default_commission_rate: rate, active: 1 });
   } catch (e) {
     res.status(400).json({ error: e.message.includes('UNIQUE') ? 'Username already exists' : e.message });
   }
@@ -828,7 +838,7 @@ app.patch('/api/admin/personnel/:id', authRequired, adminRequired, (req, res) =>
   }
   if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
   params.push(id);
-  const result = db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ? AND role = 'personnel'`).run(...params);
+  const result = db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ? AND role IN ('personnel','surveyor')`).run(...params);
   if (!result.changes) return res.status(404).json({ error: 'Personnel not found' });
   const action = password ? 'personnel.password_reset'
     : (active != null ? (active ? 'personnel.activated' : 'personnel.deactivated') : 'personnel.updated');
@@ -1068,6 +1078,135 @@ app.get('/api/admin/duplicates', authRequired, adminRequired, (req, res) => {
   res.json({ window_days: days, duplicates: result });
 });
 
+// ============ SURVEYOR (site visits) ============
+app.get('/api/surveyor/queue', authRequired, surveyorRequired, (req, res) => {
+  const { status = 'pending', search } = req.query;
+  let where = " WHERE e.site_visit_status = ?";
+  const params = [status];
+  if (search) {
+    where += " AND (e.description LIKE ? OR u.full_name LIKE ? OR e.customer_name LIKE ?)";
+    const s = `%${search}%`; params.push(s, s, s);
+  }
+  // Surveyors don't see commission_amount/rate/deductions/bonuses
+  const rows = db.prepare(`
+    SELECT
+      e.id, e.sale_date, e.description, e.sale_amount, e.customer_name, e.notes, e.drive_link,
+      e.billing_cycle_date, e.status,
+      e.site_visit_status, e.site_visit_notes, e.site_adjustment, e.site_adjustment_reason,
+      e.site_visited_by, e.site_visited_at, e.created_at,
+      u.full_name as personnel_name, u.username as personnel_username,
+      v.full_name as surveyor_name,
+      (SELECT COUNT(*) FROM attachments WHERE entry_id = e.id) as attachment_count
+    FROM entries e
+    JOIN users u ON u.id = e.personnel_id
+    LEFT JOIN users v ON v.id = e.site_visited_by
+    ${where}
+    ORDER BY e.created_at DESC
+    LIMIT 200
+  `).all(...params);
+  res.json(rows);
+});
+
+app.get('/api/surveyor/me/stats', authRequired, surveyorRequired, (req, res) => {
+  const uid = req.user.id;
+  const pending = db.prepare("SELECT COUNT(*) as c FROM entries WHERE site_visit_status = 'pending'").get().c;
+  const myCompleted = db.prepare("SELECT COUNT(*) as c FROM entries WHERE site_visited_by = ?").get(uid).c;
+  const flagged = db.prepare("SELECT COUNT(*) as c FROM entries WHERE site_visited_by = ? AND site_adjustment > 0").get(uid).c;
+  const adjustmentsTotal = db.prepare("SELECT COALESCE(SUM(site_adjustment), 0) as t FROM entries WHERE site_visited_by = ?").get(uid).t;
+  const recent = db.prepare(`
+    SELECT
+      e.id, e.sale_date, e.description, e.customer_name, e.site_visited_at,
+      e.site_adjustment, e.site_adjustment_reason,
+      u.full_name as personnel_name
+    FROM entries e
+    JOIN users u ON u.id = e.personnel_id
+    WHERE e.site_visited_by = ?
+    ORDER BY e.site_visited_at DESC
+    LIMIT 10
+  `).all(uid);
+  res.json({ pending, myCompleted, flagged, adjustmentsTotal, recent });
+});
+
+app.post('/api/surveyor/entries/:id/visit', authRequired, surveyorRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  const entry = db.prepare('SELECT id, personnel_id FROM entries WHERE id = ?').get(id);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  const { notes, adjustment, adjustment_reason } = req.body || {};
+  const adj = adjustment != null ? safeNumber(adjustment, 0) : 0;
+  const reason = adjustment_reason ? String(adjustment_reason).trim().slice(0, 500) : null;
+  const trimmedNotes = notes ? String(notes).trim().slice(0, 2000) : null;
+  if (!trimmedNotes && adj <= 0) return res.status(400).json({ error: 'Add notes or an adjustment to log this visit' });
+
+  db.prepare(`
+    UPDATE entries SET
+      site_visit_status = 'completed',
+      site_visit_notes = ?,
+      site_adjustment = ?,
+      site_adjustment_reason = ?,
+      site_visited_by = ?,
+      site_visited_at = datetime('now'),
+      updated_at = datetime('now')
+    WHERE id = ?
+  `).run(trimmedNotes, adj, reason, req.user.id, id);
+
+  audit(req, 'site.visited', 'entry', id, { adjustment: adj, has_notes: !!trimmedNotes });
+
+  // Notify the personnel
+  if (adj > 0 || trimmedNotes) {
+    const subject = adj > 0
+      ? `Site visit logged with $${adj.toFixed(2)} adjustment`
+      : 'Your site visit was completed';
+    const body = adj > 0
+      ? `Surveyor ${req.user.full_name} completed the site visit and flagged a $${adj.toFixed(2)} adjustment${reason ? ': ' + reason : '.'}`
+      : `Surveyor ${req.user.full_name} completed the site visit.${trimmedNotes ? ' Notes: ' + trimmedNotes.slice(0, 200) : ''}`;
+    queueNotification(entry.personnel_id, 'site.visited', subject, body, 'entry', id);
+  }
+
+  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
+});
+
+app.patch('/api/surveyor/entries/:id/visit', authRequired, surveyorRequired, (req, res) => {
+  // Allow re-editing a visit you logged
+  const id = parseInt(req.params.id);
+  const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
+  if (!entry) return res.status(404).json({ error: 'Not found' });
+  if (entry.site_visited_by && entry.site_visited_by !== req.user.id) {
+    return res.status(403).json({ error: 'A different surveyor logged this visit' });
+  }
+  const { notes, adjustment, adjustment_reason, status } = req.body || {};
+  const adj = adjustment != null ? safeNumber(adjustment, entry.site_adjustment || 0) : entry.site_adjustment || 0;
+  const reason = adjustment_reason != null ? String(adjustment_reason).trim().slice(0, 500) : entry.site_adjustment_reason;
+  const newNotes = notes != null ? String(notes).trim().slice(0, 2000) : entry.site_visit_notes;
+  const newStatus = status === 'pending' ? 'pending' : 'completed';
+  db.prepare(`
+    UPDATE entries SET site_visit_status = ?, site_visit_notes = ?, site_adjustment = ?,
+      site_adjustment_reason = ?, site_visited_by = ?, site_visited_at = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `).run(newStatus, newNotes, adj, reason,
+         newStatus === 'completed' ? req.user.id : null,
+         newStatus === 'completed' ? (entry.site_visited_at || new Date().toISOString()) : null,
+         id);
+  audit(req, 'site.visit_updated', 'entry', id, { status: newStatus, adjustment: adj });
+  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
+});
+
+// Admin can apply a surveyor's suggested adjustment to the entry's deductions
+app.post('/api/admin/entries/:id/apply-site-adjustment', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id);
+  const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
+  if (!entry) return res.status(404).json({ error: 'Not found' });
+  const adj = entry.site_adjustment || 0;
+  if (adj <= 0) return res.status(400).json({ error: 'No site adjustment to apply' });
+  const newDeductions = (entry.deductions || 0) + adj;
+  const newCommission = computeCommission(entry.sale_amount, entry.commission_rate, newDeductions, entry.bonuses || 0);
+  db.prepare(`
+    UPDATE entries SET deductions = ?, commission_amount = ?, updated_at = datetime('now') WHERE id = ?
+  `).run(newDeductions, newCommission, id);
+  audit(req, 'site.adjustment_applied', 'entry', id, { amount: adj, new_deductions: newDeductions });
+  invalidateStats();
+  res.json(db.prepare('SELECT * FROM entries WHERE id = ?').get(id));
+});
+
 // ============ NOTIFICATIONS LOG (admin) ============
 app.get('/api/admin/notifications', authRequired, adminRequired, (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -1162,6 +1301,7 @@ app.get('/health', (req, res) => {
 
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 app.get('/personnel', (req, res) => res.sendFile(path.join(__dirname, 'public', 'personnel.html')));
+app.get('/surveyor', (req, res) => res.sendFile(path.join(__dirname, 'public', 'surveyor.html')));
 
 // ============ 404 + ERROR HANDLER ============
 app.use('/api/*', (req, res) => res.status(404).json({ error: 'Endpoint not found' }));

@@ -32,6 +32,19 @@ for (const p of personnel) {
   pIds[p.username] = r.lastInsertRowid;
 }
 
+console.log('[seed] Creating site surveyor account...');
+const surveyors = [
+  { username: 'mike', password: 'mike123', full_name: 'Mike Thompson' }
+];
+const sIds = {};
+for (const s of surveyors) {
+  const r = db.prepare(`
+    INSERT INTO users (username, password_hash, role, full_name, default_commission_rate)
+    VALUES (?, ?, 'surveyor', ?, 0)
+  `).run(s.username, bcrypt.hashSync(s.password, 10), s.full_name);
+  sIds[s.username] = r.lastInsertRowid;
+}
+
 console.log('[seed] Adding drive links...');
 const links = [
   { title: 'Q2 2026 Verification Photos',  url: 'https://drive.google.com/drive/folders/example-q2-2026', description: 'Receipts & proof-of-sale photos for the current quarter' },
@@ -112,10 +125,34 @@ for (let ci = 0; ci < cycles.length; ci++) {
     const finalCommission = (base * rate) / 100 + bonuses;
     const customers = ['Smith Family', 'Garcia Residence', 'Patel Home', 'Johnson Property', 'Lee Family Farm', 'Walker Estate', 'Nguyen Household', 'Ali Family', 'Anderson Ranch', null];
     const customer = pick(customers);
+    // 60% of older entries already site-visited; current cycle entries mostly pending
+    let siteStatus = 'pending';
+    let siteNotes = null, siteAdjustment = 0, siteAdjustReason = null, siteVisitedBy = null, siteVisitedAt = null;
+    const visitChance = isCurrent ? 0.2 : 0.7;
+    if (Math.random() < visitChance) {
+      siteStatus = 'completed';
+      siteVisitedBy = sIds.mike;
+      const dayOffset = Math.floor(Math.random() * 5);
+      siteVisitedAt = new Date(new Date(saleDate + 'T00:00:00').getTime() + dayOffset * 86400000).toISOString();
+      const sampleNotes = [
+        'Roof in good condition. Standard install. No issues.',
+        'South-facing roof, shading is minimal. Good site.',
+        'Older roof — recommend customer reinforce before install.',
+        'Tight access for installation crew, plan for extra time.',
+        'Electrical panel needs upgrade to 200A before install.',
+        'Customer asked for additional EV charger circuit.',
+        'Tree trimming needed on east side. Coordinated with customer.'
+      ];
+      siteNotes = pick(sampleNotes);
+      if (Math.random() < 0.3) {
+        siteAdjustment = pick([500, 800, 1200, 1500, 2000]);
+        siteAdjustReason = pick(['Roof reinforcement', 'Panel upgrade', 'Tree trimming', 'Additional circuit', 'Trenching surcharge']);
+      }
+    }
     db.prepare(`
-      INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, status, billing_cycle_date, notes, drive_link, customer_name, deductions, bonuses)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(personnelId, saleDate, pick(products), saleAmount, rate, finalCommission, status, cycle, notes, driveLink, customer, deductions, bonuses);
+      INSERT INTO entries (personnel_id, sale_date, description, sale_amount, commission_rate, commission_amount, status, billing_cycle_date, notes, drive_link, customer_name, deductions, bonuses, site_visit_status, site_visit_notes, site_adjustment, site_adjustment_reason, site_visited_by, site_visited_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(personnelId, saleDate, pick(products), saleAmount, rate, finalCommission, status, cycle, notes, driveLink, customer, deductions, bonuses, siteStatus, siteNotes, siteAdjustment, siteAdjustReason, siteVisitedBy, siteVisitedAt);
     totalEntries++;
   }
 }
@@ -127,4 +164,6 @@ console.log(`  Entries:           ${totalEntries} across ${cycles.length} cycles
 console.log(`\n  Admin login:    admin / admin123`);
 console.log(`  Personnel logins:`);
 for (const p of personnel) console.log(`    ${p.full_name.padEnd(20)} ${p.username} / ${p.password}  (default rate ${p.rate}%)`);
+console.log(`  Site Surveyor logins:`);
+for (const s of surveyors) console.log(`    ${s.full_name.padEnd(20)} ${s.username} / ${s.password}`);
 console.log(`=========================\n`);

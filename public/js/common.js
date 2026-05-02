@@ -31,7 +31,7 @@ function requireAuth(role) {
   const user = API.user();
   if (!user || !API.token()) { window.location.href = '/'; return null; }
   if (role && user.role !== role) {
-    window.location.href = user.role === 'admin' ? '/admin' : '/personnel';
+    window.location.href = user.role === 'admin' ? '/admin' : (user.role === 'surveyor' ? '/surveyor' : '/personnel');
     return null;
   }
   return user;

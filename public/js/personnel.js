@@ -170,6 +170,11 @@ function renderEntries() {
           ${e.attachment_count > 0 ? `<span class="inline-flex items-center gap-1 ml-2 px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-xs font-medium" title="${e.attachment_count} attachment${e.attachment_count === 1 ? '' : 's'}"><i data-lucide="paperclip" class="w-3 h-3"></i>${e.attachment_count}</span>` : ''}
         </div>
         ${e.customer_name ? `<div class="text-xs text-slate-500">${escapeHtml(e.customer_name)}</div>` : ''}
+        ${e.site_visit_status === 'pending'
+          ? '<div class="text-xs text-amber-700 mt-1 inline-flex items-center gap-1"><i data-lucide="map-pin" class="w-3 h-3"></i>Site visit pending</div>'
+          : (e.site_visit_status === 'completed'
+              ? `<div class="text-xs text-violet-700 mt-1 inline-flex items-center gap-1"><i data-lucide="map-pin" class="w-3 h-3"></i>Site visited${e.site_adjustment > 0 ? ` · +${fmtMoney(e.site_adjustment)} flagged` : ''}</div>`
+              : '')}
       </td>
       <td class="px-4 py-3 text-right whitespace-nowrap align-top">${fmtMoney(e.sale_amount)}</td>
       <td class="px-4 py-3 text-center align-top">

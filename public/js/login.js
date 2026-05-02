@@ -40,7 +40,7 @@ form.addEventListener('submit', async (e) => {
     const { token, user } = await res.json();
     localStorage.setItem('token', token);
     localStorage.setItem('user', JSON.stringify(user));
-    window.location.href = user.role === 'admin' ? '/admin' : '/personnel';
+    window.location.href = user.role === 'admin' ? '/admin' : (user.role === 'surveyor' ? '/surveyor' : '/personnel');
   } catch (err) {
     showError(err.message);
     submitBtn.disabled = false;

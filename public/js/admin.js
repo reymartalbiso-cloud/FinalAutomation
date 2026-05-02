@@ -745,20 +745,36 @@ function renderPersonnel() {
   const loginUrl = window.location.origin + '/';
   grid.innerHTML = state.personnel.map(p => {
     const init = p.full_name.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
+    const isSurveyor = p.role === 'surveyor';
+    const roleBadge = isSurveyor
+      ? '<span class="inline-flex items-center gap-1 text-xs text-violet-700 bg-violet-50 px-2 py-0.5 rounded-full"><i data-lucide="map-pin" class="w-3 h-3"></i>Site Surveyor</span>'
+      : '<span class="inline-flex items-center gap-1 text-xs text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full"><i data-lucide="user" class="w-3 h-3"></i>Sales Personnel</span>';
+    const avatarBg = isSurveyor
+      ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500'
+      : 'bg-gradient-to-br from-indigo-500 to-violet-600';
     return `
       <div class="stat-card">
         <div class="flex items-start gap-3 mb-4">
-          <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white font-bold shrink-0">${escapeHtml(init)}</div>
+          <div class="w-12 h-12 rounded-xl ${avatarBg} flex items-center justify-center text-white font-bold shrink-0">${escapeHtml(init)}</div>
           <div class="flex-1 min-w-0">
             <div class="font-semibold text-slate-900 truncate">${escapeHtml(p.full_name)}</div>
             <div class="text-xs text-slate-500 font-mono truncate">@${escapeHtml(p.username)}</div>
-            <div class="mt-1.5">
+            <div class="mt-1.5 flex flex-wrap gap-1">
+              ${roleBadge}
               ${p.active
                 ? '<span class="inline-flex items-center gap-1 text-xs text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full"><span class="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>Active</span>'
                 : '<span class="inline-flex items-center gap-1 text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">Inactive</span>'}
             </div>
           </div>
         </div>
+        ${isSurveyor ? `
+        <div class="grid grid-cols-1 gap-2 mb-4 pt-4 border-t border-slate-100">
+          <div>
+            <div class="text-xs text-slate-500">Site visits completed</div>
+            <div class="text-sm font-semibold text-slate-900">${fmtInt(p.visits_done || 0)}</div>
+          </div>
+        </div>
+        ` : `
         <div class="grid grid-cols-2 gap-2 mb-4 pt-4 border-t border-slate-100">
           <div>
             <div class="text-xs text-slate-500">Total Commission</div>
@@ -784,6 +800,7 @@ function renderPersonnel() {
             <option value="30" ${p.default_commission_rate === 30 ? 'selected' : ''}>30%</option>
           </select>
         </div>
+        `}
         <div class="flex flex-wrap gap-2">
           <button onclick="copyLoginLink('${escapeAttr(loginUrl)}', '${escapeAttr(p.username)}')" class="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-md">
             <i data-lucide="copy" class="w-3 h-3"></i> Copy Login
@@ -972,16 +989,30 @@ function setupModals() {
   // personnel
   const pModal = document.getElementById('newPersonnelModal');
   const pForm = document.getElementById('newPersonnelForm');
-  document.getElementById('newPersonnelBtn').addEventListener('click', () => { pForm.reset(); pForm.querySelector('input[value="70"]').checked = true; openModal(pModal); refreshIcons(); });
+  function applyRoleVisibility() {
+    const role = pForm.querySelector('input[name="role"]:checked')?.value || 'personnel';
+    pForm.querySelectorAll('[data-personnel-only]').forEach(el => {
+      el.style.display = role === 'personnel' ? '' : 'none';
+    });
+  }
+  pForm.querySelectorAll('input[name="role"]').forEach(r => r.addEventListener('change', applyRoleVisibility));
+  document.getElementById('newPersonnelBtn').addEventListener('click', () => {
+    pForm.reset();
+    pForm.querySelector('input[name="role"][value="personnel"]').checked = true;
+    pForm.querySelector('input[name="default_commission_rate"][value="70"]').checked = true;
+    applyRoleVisibility();
+    openModal(pModal);
+    refreshIcons();
+  });
   pForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(pForm);
     const body = Object.fromEntries(fd);
-    body.default_commission_rate = parseInt(body.default_commission_rate);
+    body.default_commission_rate = parseInt(body.default_commission_rate) || 70;
     try {
       await API.fetch('/api/admin/personnel', { method: 'POST', body: JSON.stringify(body) });
       closeModal(pModal);
-      toast('Personnel created', 'success');
+      toast(body.role === 'surveyor' ? 'Site surveyor created' : 'Sales personnel created', 'success');
       await refresh();
     } catch (err) { toast(err.message, 'error'); }
   });
@@ -1073,6 +1104,7 @@ window.openEdit = async function(id) {
     </div>
   `;
   document.getElementById('editEntryBreakdown').innerHTML = renderAdminBreakdown(e);
+  document.getElementById('editEntrySiteVisit').innerHTML = renderSiteVisitCard(e);
   document.getElementById('editEntryAttachments').innerHTML = `
     <div class="text-sm text-slate-500 flex items-center gap-2"><i data-lucide="paperclip" class="w-4 h-4"></i>Loading attachments...</div>
   `;
@@ -1744,3 +1776,67 @@ async function bulkCreateAll() {
   toast(`${created} created, ${failed} failed`, failed ? 'warn' : 'success');
   await refresh();
 }
+
+
+// ============================================================
+// SITE VISIT REPORT (in admin verify modal)
+// ============================================================
+function renderSiteVisitCard(e) {
+  if (e.site_visit_status === 'pending' || !e.site_visited_at) {
+    return `
+      <div class="rounded-xl border border-amber-200 bg-amber-50/50 p-4 flex items-center gap-3">
+        <div class="w-10 h-10 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+          <i data-lucide="map-pin" class="w-5 h-5"></i>
+        </div>
+        <div>
+          <div class="text-sm font-semibold text-amber-900">Site visit pending</div>
+          <div class="text-xs text-amber-800">Waiting for the site surveyor's report.</div>
+        </div>
+      </div>
+    `;
+  }
+  const surveyor = state.personnel.find(p => p.id === e.site_visited_by);
+  const surveyorName = surveyor?.full_name || 'Surveyor';
+  const adj = e.site_adjustment || 0;
+  return `
+    <div class="rounded-xl border border-violet-200 bg-violet-50/40 p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <div class="w-8 h-8 rounded-lg bg-violet-100 text-violet-700 flex items-center justify-center shrink-0">
+          <i data-lucide="map-pin" class="w-4 h-4"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-semibold text-violet-900">Site Visit Report</div>
+          <div class="text-xs text-violet-700">By ${escapeHtml(surveyorName)} · ${fmtRelative(e.site_visited_at)}</div>
+        </div>
+      </div>
+      ${e.site_visit_notes ? `<div class="text-sm text-slate-700 bg-white rounded-lg p-3 border border-violet-100 whitespace-pre-line mb-2">${escapeHtml(e.site_visit_notes)}</div>` : ''}
+      ${adj > 0 ? `
+        <div class="mt-2 p-3 rounded-lg bg-amber-50 border border-amber-200 flex items-start gap-2">
+          <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-700 mt-0.5 shrink-0"></i>
+          <div class="flex-1">
+            <div class="text-sm font-semibold text-amber-900">Suggested adjustment: ${fmtMoney(adj)}</div>
+            ${e.site_adjustment_reason ? `<div class="text-xs text-amber-800 mt-0.5">${escapeHtml(e.site_adjustment_reason)}</div>` : ''}
+          </div>
+          <button type="button" onclick="applySiteAdjustment(${e.id})" class="px-2.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-md inline-flex items-center gap-1 shrink-0">
+            <i data-lucide="copy-check" class="w-3.5 h-3.5"></i> Apply to deductions
+          </button>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+window.applySiteAdjustment = async function(id) {
+  const ok = await confirmDialog({
+    title: 'Apply site adjustment to deductions?',
+    message: 'This adds the surveyor\'s suggested adjustment to this entry\'s deductions and recalculates the commission.',
+    confirmText: 'Apply'
+  });
+  if (!ok) return;
+  try {
+    await API.fetch(`/api/admin/entries/${id}/apply-site-adjustment`, { method: 'POST' });
+    toast('Adjustment applied to deductions', 'success');
+    closeModal(document.getElementById('editEntryModal'));
+    await refresh();
+  } catch (e) { toast(e.message, 'error'); }
+};

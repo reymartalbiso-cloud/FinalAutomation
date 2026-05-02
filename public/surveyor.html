@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Solar Savings Direct · Site Surveyor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script>
+    tailwind = { config: { theme: { extend: { colors: {
+      indigo: { 50:'#eef2f7',100:'#d6dfeb',200:'#a6bad5',300:'#6c8cb7',400:'#3c649a',500:'#1e4d8c',600:'#0b2545',700:'#061a2e',800:'#04121f',900:'#020a13' },
+      violet: { 50:'#fff8e6',100:'#ffecb3',200:'#ffdc7a',300:'#ffcc42',400:'#ffb703',500:'#ffb703',600:'#fd9e02',700:'#d48001',800:'#9e5f01',900:'#6e4201' }
+    } } } } };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body class="min-h-screen comfort-mode">
+
+<header class="bg-white border-b border-slate-200 sticky top-0 z-30">
+  <div class="max-w-7xl mx-auto px-4 lg:px-8">
+    <div class="flex items-center justify-between h-16">
+      <div class="flex items-center gap-3">
+        <div class="w-11 h-11 rounded-xl bg-sun-gradient flex items-center justify-center text-white shadow-sm">
+          <i data-lucide="map-pin" class="w-6 h-6"></i>
+        </div>
+        <div>
+          <div class="font-bold text-slate-900 leading-tight text-base">Solar Savings Direct</div>
+          <div class="text-xs text-slate-500 hidden sm:block">Site Surveyor portal</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <div class="text-right hidden sm:block">
+          <div class="text-sm font-medium text-slate-800" id="userLabel"></div>
+          <div class="text-xs text-slate-500">Site Surveyor</div>
+        </div>
+        <div class="w-10 h-10 rounded-full bg-sun-gradient flex items-center justify-center text-white font-semibold text-sm" id="userAvatar">?</div>
+        <button id="logoutBtn" class="text-slate-500 hover:text-slate-900 p-2 rounded-lg hover:bg-slate-100" title="Sign out"><i data-lucide="log-out" class="w-5 h-5"></i></button>
+      </div>
+    </div>
+    <nav class="flex gap-1 -mb-px overflow-x-auto">
+      <button data-tab="dashboard" class="tab-btn"><i data-lucide="home"></i>Home</button>
+      <button data-tab="pending" class="tab-btn"><i data-lucide="clipboard-list"></i>Pending Visits
+        <span id="pendingBadge" class="ml-2 px-1.5 py-0.5 bg-amber-500 text-white text-xs rounded-full hidden"></span>
+      </button>
+      <button data-tab="completed" class="tab-btn"><i data-lucide="check-circle-2"></i>My Completed</button>
+      <button data-tab="settings" class="tab-btn"><i data-lucide="settings"></i>Settings</button>
+    </nav>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-4 lg:px-8 py-6 lg:py-8">
+  <!-- Home -->
+  <div data-panel="dashboard" class="animate-fade-in">
+    <div class="mb-6">
+      <h1 class="text-3xl font-bold text-slate-900" id="greetingText">Welcome back</h1>
+      <p class="text-base text-slate-500 mt-1">Here's what's waiting for site visits.</p>
+    </div>
+    <div class="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Pending Visits</div>
+            <div class="text-3xl font-bold text-amber-600 mt-2" id="statPending">0</div>
+            <div class="text-xs text-slate-500 mt-2">across the team</div>
+          </div>
+          <div class="w-11 h-11 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center"><i data-lucide="clipboard-list" class="w-6 h-6"></i></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">My Visits Done</div>
+            <div class="text-3xl font-bold text-emerald-600 mt-2" id="statCompleted">0</div>
+            <div class="text-xs text-slate-500 mt-2">total</div>
+          </div>
+          <div class="w-11 h-11 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center"><i data-lucide="check-circle-2" class="w-6 h-6"></i></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Flagged with Charges</div>
+            <div class="text-3xl font-bold text-rose-600 mt-2" id="statFlagged">0</div>
+            <div class="text-xs text-slate-500 mt-2">visits</div>
+          </div>
+          <div class="w-11 h-11 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center"><i data-lucide="alert-triangle" class="w-6 h-6"></i></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Total Adjustments</div>
+            <div class="text-3xl font-bold text-slate-900 mt-2" id="statAdjustments">$0.00</div>
+            <div class="text-xs text-slate-500 mt-2">surveyed by you</div>
+          </div>
+          <div class="w-11 h-11 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center"><i data-lucide="dollar-sign" class="w-6 h-6"></i></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-semibold text-slate-900 text-lg">Your recent site visits</h2>
+        <button onclick="(typeof activateTab==='function') ? activateTab('completed') : null" class="text-sm text-indigo-600 hover:underline">View all →</button>
+      </div>
+      <div id="recentVisits"></div>
+    </div>
+  </div>
+
+  <!-- Pending visits -->
+  <div data-panel="pending" class="hidden animate-fade-in">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h1 class="text-3xl font-bold text-slate-900">Pending Visits</h1>
+        <p class="text-base text-slate-500 mt-1">Sales waiting for your on-site report.</p>
+      </div>
+      <div class="relative">
+        <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+        <input id="pendingSearch" placeholder="Search customer, salesperson..." class="pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm w-64" />
+      </div>
+    </div>
+    <div id="pendingList" class="space-y-3"></div>
+  </div>
+
+  <!-- Completed -->
+  <div data-panel="completed" class="hidden animate-fade-in">
+    <div class="mb-6">
+      <h1 class="text-3xl font-bold text-slate-900">My Completed Visits</h1>
+      <p class="text-base text-slate-500 mt-1">Everything you've reported on.</p>
+    </div>
+    <div id="completedList" class="space-y-3"></div>
+  </div>
+
+  <!-- Settings -->
+  <div data-panel="settings" class="hidden animate-fade-in">
+    <div class="mb-6">
+      <h1 class="text-3xl font-bold text-slate-900">Settings</h1>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="stat-card">
+        <h2 class="font-semibold text-slate-900 mb-4 text-lg">Change my password</h2>
+        <form id="changePasswordForm" class="space-y-3">
+          <div>
+            <label class="text-sm font-medium text-slate-700">Current password</label>
+            <input name="current_password" type="password" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+          </div>
+          <div>
+            <label class="text-sm font-medium text-slate-700">New password</label>
+            <input name="new_password" type="password" required minlength="8" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+            <div class="text-xs text-slate-500 mt-1">At least 8 characters.</div>
+          </div>
+          <button type="submit" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold">Update Password</button>
+        </form>
+      </div>
+      <div class="stat-card">
+        <h2 class="font-semibold text-slate-900 mb-4 text-lg">My profile</h2>
+        <dl class="text-sm space-y-2">
+          <div class="flex justify-between"><dt class="text-slate-500">Name</dt><dd class="font-medium text-slate-900" id="profileName"></dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Username</dt><dd class="font-medium text-slate-900 font-mono" id="profileUsername"></dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Role</dt><dd class="font-medium text-slate-900">Site Surveyor</dd></div>
+        </dl>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Visit modal -->
+<div id="visitModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+  <div class="bg-white rounded-2xl max-w-lg w-full shadow-2xl flex flex-col max-h-[95vh]">
+    <div class="px-5 py-4 border-b border-slate-200 flex items-start justify-between">
+      <div>
+        <h3 class="text-xl font-bold text-slate-900">Site Visit Report</h3>
+        <p class="text-sm text-slate-500 mt-0.5" id="visitModalSubtitle"></p>
+      </div>
+      <button type="button" data-close class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <form id="visitForm" class="flex-1 overflow-y-auto p-5 space-y-4">
+      <input type="hidden" name="entry_id" />
+
+      <!-- Sale info -->
+      <div id="visitSaleInfo" class="bg-slate-50 rounded-xl p-4 space-y-1 text-sm"></div>
+
+      <!-- Existing attachments (uploaded by personnel) -->
+      <div>
+        <div class="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+          <i data-lucide="paperclip" class="w-4 h-4"></i>Files from personnel
+        </div>
+        <div id="visitExistingAttachments" class="text-sm"></div>
+      </div>
+
+      <!-- Surveyor's notes -->
+      <div>
+        <label class="text-sm font-medium text-slate-700">Site visit notes <span class="text-rose-500">*</span></label>
+        <textarea name="notes" rows="4" required class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="What did you find? Roof condition, electrical, access, etc."></textarea>
+        <div class="text-xs text-slate-500 mt-1">These notes will be visible to the admin and the personnel.</div>
+      </div>
+
+      <!-- Adjustment / additional charges -->
+      <div class="border border-amber-200 bg-amber-50/40 rounded-xl p-4">
+        <div class="text-sm font-medium text-amber-900 mb-2 flex items-center gap-2">
+          <i data-lucide="alert-triangle" class="w-4 h-4"></i>Additional charges (optional)
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="sm:col-span-1">
+            <label class="text-xs font-medium text-slate-700">Amount ($)</label>
+            <input name="adjustment" type="number" step="0.01" min="0" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="0.00" />
+          </div>
+          <div class="sm:col-span-2">
+            <label class="text-xs font-medium text-slate-700">Reason</label>
+            <input name="adjustment_reason" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="e.g. Roof reinforcement needed" />
+          </div>
+        </div>
+        <div class="text-xs text-amber-800 mt-2">If you found anything that should change the customer's bill or the commission, log it here. The admin can apply it to the entry.</div>
+      </div>
+
+      <!-- Photo upload -->
+      <div>
+        <div class="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+          <i data-lucide="camera" class="w-4 h-4"></i>Add site photos (optional)
+        </div>
+        <div id="visitQueuedAttachments" class="space-y-2 mb-2"></div>
+        <label for="visitAttachInput" id="visitDropzone" class="block border-2 border-dashed border-slate-300 rounded-lg p-4 text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition">
+          <input id="visitAttachInput" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,image/gif,application/pdf" multiple class="hidden" />
+          <i data-lucide="upload-cloud" class="w-6 h-6 mx-auto mb-1 text-slate-400"></i>
+          <div class="text-sm text-slate-600">Click to add site photos or drop them here</div>
+          <div class="text-xs text-slate-400 mt-0.5">Photos help the admin verify your report</div>
+        </label>
+      </div>
+    </form>
+    <div class="px-5 py-4 border-t border-slate-200 flex gap-2 justify-end">
+      <button type="button" data-close class="px-4 py-2.5 text-slate-700 font-medium hover:bg-slate-100 rounded-lg">Cancel</button>
+      <button type="button" id="visitSubmitBtn" class="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold inline-flex items-center gap-2">
+        <i data-lucide="check" class="w-4 h-4"></i> Mark Visit Complete
+      </button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/common.js"></script>
+<script src="/js/surveyor.js"></script>
+</body>
+</html>

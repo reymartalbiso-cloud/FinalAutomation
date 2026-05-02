@@ -15,7 +15,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('admin','personnel')),
+    role TEXT NOT NULL CHECK(role IN ('admin','personnel','surveyor')),
     full_name TEXT NOT NULL,
     default_commission_rate INTEGER DEFAULT 70,
     active INTEGER DEFAULT 1,
@@ -120,6 +120,63 @@ if (!columnExists('users', 'email')) {
 }
 if (!columnExists('users', 'phone')) {
   db.exec("ALTER TABLE users ADD COLUMN phone TEXT");
+}
+
+// Site visit fields on entries
+if (!columnExists('entries', 'site_visit_status')) {
+  db.exec("ALTER TABLE entries ADD COLUMN site_visit_status TEXT NOT NULL DEFAULT 'pending'");
+}
+if (!columnExists('entries', 'site_visit_notes')) {
+  db.exec("ALTER TABLE entries ADD COLUMN site_visit_notes TEXT");
+}
+if (!columnExists('entries', 'site_adjustment')) {
+  db.exec("ALTER TABLE entries ADD COLUMN site_adjustment REAL NOT NULL DEFAULT 0");
+}
+if (!columnExists('entries', 'site_adjustment_reason')) {
+  db.exec("ALTER TABLE entries ADD COLUMN site_adjustment_reason TEXT");
+}
+if (!columnExists('entries', 'site_visited_by')) {
+  db.exec("ALTER TABLE entries ADD COLUMN site_visited_by INTEGER");
+}
+if (!columnExists('entries', 'site_visited_at')) {
+  db.exec("ALTER TABLE entries ADD COLUMN site_visited_at TEXT");
+}
+db.exec("CREATE INDEX IF NOT EXISTS idx_entries_visit_status ON entries(site_visit_status)");
+
+// One-time migration: extend users.role CHECK constraint to allow 'surveyor'
+const usersSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").get()?.sql || '';
+if (!usersSql.includes("'surveyor'")) {
+  console.log("[migrate] Extending users table to allow 'surveyor' role...");
+  db.pragma('foreign_keys = OFF');
+  try {
+    const tx = db.transaction(() => {
+      const cols = db.prepare("PRAGMA table_info(users)").all().map(c => c.name);
+      const hasEmail = cols.includes('email');
+      const hasPhone = cols.includes('phone');
+      const extraDef = (hasEmail ? ',\n          email TEXT' : '') + (hasPhone ? ',\n          phone TEXT' : '');
+      db.exec(`
+        CREATE TABLE users_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          username TEXT UNIQUE NOT NULL,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('admin','personnel','surveyor')),
+          full_name TEXT NOT NULL,
+          default_commission_rate INTEGER DEFAULT 70,
+          active INTEGER DEFAULT 1,
+          created_at TEXT DEFAULT (datetime('now'))${extraDef}
+        )
+      `);
+      const copyCols = ['id','username','password_hash','role','full_name','default_commission_rate','active','created_at']
+        .concat(hasEmail ? ['email'] : [])
+        .concat(hasPhone ? ['phone'] : []);
+      db.exec(`INSERT INTO users_new (${copyCols.join(',')}) SELECT ${copyCols.join(',')} FROM users`);
+      db.exec(`DROP TABLE users`);
+      db.exec(`ALTER TABLE users_new RENAME TO users`);
+    });
+    tx();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 const adminCount = db.prepare("SELECT COUNT(*) as c FROM users WHERE role='admin'").get().c;
